@@ -9,12 +9,22 @@ app = Flask(__name__)
 
 # Initialize Firebase
 try:
-    cred = credentials.Certificate('path/to/your/firebase-service-account-key.json')
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://console.firebase.google.com/project/heriwadi-bookshop/database/heriwadi-bookshop-default-rtdb/data/~2F'
-    })
-except:
-    print("Firebase initialization failed - using mock data")
+    # Try to use service account if available
+    if os.path.exists('firebase-service-account-key.json'):
+        cred = credentials.Certificate('firebase-service-account-key.json')
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': 'https://heriwadi-bookshop-default-rtdb.firebaseio.com'
+        })
+        print("✅ Firebase initialized with service account")
+    else:
+        # Use default credentials (works on some hosting platforms)
+        firebase_admin.initialize_app(options={
+            'databaseURL': 'https://heriwadi-bookshop-default-rtdb.firebaseio.com'
+        })
+        print("✅ Firebase initialized with default credentials")
+except Exception as e:
+    print(f"⚠️  Firebase initialization failed: {e}")
+    print("Running in demo mode with mock data")
 
 @app.route('/')
 def dashboard():
@@ -56,10 +66,15 @@ def get_stats():
             
             # Today's sales
             today = datetime.now().date()
-            today_sales = sum(
-                sale.get('total_amount', 0) for sale in sales_data.values()
-                if datetime.fromisoformat(sale.get('timestamp', '')).date() == today
-            )
+            today_sales = 0
+            
+            for sale in sales_data.values():
+                try:
+                    sale_date = datetime.fromisoformat(sale.get('timestamp', '')).date()
+                    if sale_date == today:
+                        today_sales += sale.get('total_amount', 0)
+                except:
+                    pass
             
             return jsonify({
                 'total_sales': total_sales,
@@ -96,5 +111,4 @@ def get_recent_activity():
     return jsonify([])
 
 if __name__ == '__main__':
-
     app.run(debug=True, host='0.0.0.0', port=5000)
