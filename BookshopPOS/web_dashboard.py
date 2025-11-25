@@ -11,14 +11,14 @@ app = Flask(__name__)
 try:
     cred = credentials.Certificate('path/to/your/firebase-service-account-key.json')
     firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://your-project-id.firebaseio.com/'
+        'databaseURL': 'https://console.firebase.google.com/project/heriwadi-bookshop/database/heriwadi-bookshop-default-rtdb/data/~2F'
     })
 except:
     print("Firebase initialization failed - using mock data")
 
 @app.route('/')
 def dashboard():
-    return render_template('dashboard.html')
+    return render_template('index.html')
 
 @app.route('/api/sales')
 def get_sales():
@@ -96,4 +96,5 @@ def get_recent_activity():
     return jsonify([])
 
 if __name__ == '__main__':
+
     app.run(debug=True, host='0.0.0.0', port=5000)
