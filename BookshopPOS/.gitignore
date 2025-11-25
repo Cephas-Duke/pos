@@ -1,0 +1,8 @@
+firebase-service-account-key.json
+*.pyc
+__pycache__/
+.env
+venv/
+*.db
+receipts/
+main.py
