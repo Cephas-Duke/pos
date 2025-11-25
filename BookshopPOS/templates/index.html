@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HERIWADI BOOKSHOP - Live Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h1 class="text-3xl font-bold text-gray-800">HERIWADI BOOKSHOP</h1>
+            <p class="text-gray-600">Live Sales Dashboard</p>
+            <p class="text-sm text-gray-500">OLEKASI Along Maasai Lodge - Rimpa Road | 0723322449</p>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h3 class="text-lg font-semibold text-gray-700 mb-2">Today's Sales</h3>
+                <p class="text-3xl font-bold text-green-600" id="todaySales">KES 0.00</p>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h3 class="text-lg font-semibold text-gray-700 mb-2">Total Sales</h3>
+                <p class="text-3xl font-bold text-blue-600" id="totalSales">KES 0.00</p>
+            </div>
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h3 class="text-lg font-semibold text-gray-700 mb-2">Total Transactions</h3>
+                <p class="text-3xl font-bold text-purple-600" id="totalTransactions">0</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Recent Sales -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h3 class="text-xl font-semibold text-gray-800 mb-4">Recent Sales</h3>
+                <div id="recentSales" class="space-y-3">
+                    <div class="text-center text-gray-500">Loading sales data...</div>
+                </div>
+            </div>
+
+            <!-- Recent Activity -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <h3 class="text-xl font-semibold text-gray-800 mb-4">Recent Activity</h3>
+                <div id="recentActivity" class="space-y-3">
+                    <div class="text-center text-gray-500">Loading activity...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Fetch and update data
+        async function updateDashboard() {
+            try {
+                // Fetch stats
+                const statsResponse = await fetch('/api/stats');
+                const stats = await statsResponse.json();
+                
+                document.getElementById('todaySales').textContent = `KES ${stats.today_sales.toFixed(2)}`;
+                document.getElementById('totalSales').textContent = `KES ${stats.total_sales.toFixed(2)}`;
+                document.getElementById('totalTransactions').textContent = stats.total_transactions;
+
+                // Fetch recent sales
+                const salesResponse = await fetch('/api/sales');
+                const sales = await salesResponse.json();
+                
+                const salesContainer = document.getElementById('recentSales');
+                if (sales.length > 0) {
+                    salesContainer.innerHTML = sales.map(sale => `
+                        <div class="border-l-4 border-green-500 bg-gray-50 p-3 rounded">
+                            <div class="flex justify-between items-center">
+                                <span class="font-semibold">Sale #${sale.id}</span>
+                                <span class="text-green-600 font-bold">KES ${sale.amount.toFixed(2)}</span>
+                            </div>
+                            <div class="text-sm text-gray-600">
+                                ${sale.payment_method} • ${new Date(sale.timestamp).toLocaleString()}
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    salesContainer.innerHTML = '<div class="text-center text-gray-500">No sales data available</div>';
+                }
+
+                // Fetch recent activity
+                const activityResponse = await fetch('/api/recent-activity');
+                const activities = await activityResponse.json();
+                
+                const activityContainer = document.getElementById('recentActivity');
+                if (activities.length > 0) {
+                    activityContainer.innerHTML = activities.map(activity => `
+                        <div class="border-l-4 border-blue-500 bg-gray-50 p-3 rounded">
+                            <div class="font-semibold">${activity.message}</div>
+                            <div class="text-sm text-gray-600">
+                                ${new Date(activity.timestamp).toLocaleString()}
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    activityContainer.innerHTML = '<div class="text-center text-gray-500">No recent activity</div>';
+                }
+
+            } catch (error) {
+                console.error('Error updating dashboard:', error);
+            }
+        }
+
+        // Update every 10 seconds
+        setInterval(updateDashboard, 10000);
+        updateDashboard(); // Initial load
+    </script>
+</body>
+</html>
