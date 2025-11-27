@@ -2,59 +2,56 @@ from flask import Flask, render_template, jsonify, request
 import firebase_admin
 from firebase_admin import credentials, db
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
+import sys
 
 app = Flask(__name__)
 
-# Initialize Firebase with environment variables (for Render)
-def init_firebase():
-    try:
-        # Check if we have Firebase credentials in environment
-        firebase_creds = os.environ.get('FIREBASE_CREDENTIALS')
-        
-        if firebase_creds:
-            # Parse JSON credentials from environment variable
-            cred_dict = json.loads(firebase_creds)
-            cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': 'https://heriwadi-bookshop-default-rtdb.firebaseio.com'
-            })
-            print("✅ Firebase initialized with environment credentials")
-            return True
-            
-        elif os.path.exists('firebase-service-account-key.json'):
-            # Use local file for development
-            cred = credentials.Certificate('firebase-service-account-key.json')
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': 'https://heriwadi-bookshop-default-rtdb.firebaseio.com'
-            })
-            print("✅ Firebase initialized with local service account file")
-            return True
-            
-        else:
-            print("⚠️  No Firebase credentials found")
-            print("Set FIREBASE_CREDENTIALS environment variable or add firebase-service-account-key.json")
-            return False
-            
-    except Exception as e:
-        print(f"❌ Firebase initialization failed: {e}")
-        return False
+# --- CONFIGURATION ---
+# Use the exact database URL from your desktop POS application
+FIREBASE_DATABASE_URL = 'https://heriwadi-bookshop-default-rtdb.firebaseio.com'
 
 # Initialize Firebase
-firebase_connected = init_firebase()
+try:
+    # 1. Securely load credentials from the environment variable (Required for Render)
+    cred_json_str = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+    
+    if cred_json_str:
+        # Load the JSON string into a dictionary
+        cred_info = json.loads(cred_json_str)
+        # Use the dictionary content for credentials
+        cred = credentials.Certificate(cred_info)
+        
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': FIREBASE_DATABASE_URL
+        })
+        print("✅ Firebase initialized successfully from Environment Variable.")
+        
+    else:
+        # This block executes if the environment variable is missing on Render
+        print("⚠️ FIREBASE_CREDENTIALS_JSON environment variable not found.")
+        print("🔴 Dashboard will fail to fetch live data. Please check Render configuration.")
+        sys.exit(1) 
+        
+except Exception as e:
+    # This block executes if there's a parsing error in the JSON or a connection issue
+    print(f"❌ Firebase initialization failed: {e}")
+    sys.exit(1)
+
+# --- FLASK ROUTES ---
 
 @app.route('/')
 def dashboard():
+    """Renders the main dashboard HTML template. Corrected to use index.html."""
     return render_template('index.html')
 
 @app.route('/api/sales')
 def get_sales():
-    if not firebase_connected:
-        return jsonify([])
-    
+    """Fetches and formats recent sales for the activity feed."""
     try:
         ref = db.reference('/sales')
+        # Limit to the last 50 sales
         sales_data = ref.order_by_child('timestamp').limit_to_last(50).get()
         
         if sales_data:
@@ -62,12 +59,12 @@ def get_sales():
             for key, value in sales_data.items():
                 sales.append({
                     'id': value.get('sale_id', ''),
-                    'amount': float(value.get('total_amount', 0)),
+                    'amount': value.get('total_amount', 0),
                     'payment_method': value.get('payment_method', ''),
                     'timestamp': value.get('timestamp', ''),
                     'items_count': len(value.get('items', []))
                 })
-            return jsonify(sales[::-1])
+            return jsonify(sales[::-1])  # Reverse to show latest first
     except Exception as e:
         print(f"Error fetching sales: {e}")
     
@@ -75,44 +72,47 @@ def get_sales():
 
 @app.route('/api/stats')
 def get_stats():
-    if not firebase_connected:
-        return jsonify({
-            'total_sales': 0,
-            'total_transactions': 0,
-            'today_sales': 0
-        })
-    
+    """Calculates and returns total sales, transactions, and today's sales (Robust Date Check)."""
     try:
         ref = db.reference('/sales')
         sales_data = ref.get()
         
         if sales_data:
-            total_sales = sum(float(sale.get('total_amount', 0)) for sale in sales_data.values())
-            total_transactions = len(sales_data)
+            total_sales = 0.0
+            total_transactions = 0
+            today_sales = 0.0
             
-            # Today's sales
+            # Get today's date once
             today = datetime.now().date()
-            today_sales = 0
             
             for sale in sales_data.values():
-                try:
-                    timestamp = sale.get('timestamp', '')
-                    if timestamp:
-                        sale_date = datetime.fromisoformat(timestamp.replace('Z', '+00:00')).date()
+                total_amount = sale.get('total_amount', 0)
+                timestamp_str = sale.get('timestamp')
+
+                # Calculate cumulative totals
+                total_sales += total_amount
+                total_transactions += 1
+                
+                # Robust calculation for Today's sales
+                if timestamp_str:
+                    try:
+                        # Use fromisoformat which handles the format generated by main.py
+                        sale_date = datetime.fromisoformat(timestamp_str).date()
                         if sale_date == today:
-                            today_sales += float(sale.get('total_amount', 0))
-                except Exception as date_error:
-                    print(f"Date parsing error: {date_error}")
-                    pass
+                            today_sales += total_amount
+                    except ValueError:
+                        # This catches improperly formatted timestamps, ensuring the loop continues.
+                        print(f"Warning: Could not parse timestamp '{timestamp_str}'.")
             
             return jsonify({
-                'total_sales': round(total_sales, 2),
+                'total_sales': total_sales,
                 'total_transactions': total_transactions,
-                'today_sales': round(today_sales, 2)
+                'today_sales': today_sales
             })
     except Exception as e:
         print(f"Error fetching stats: {e}")
     
+    # Return default zero values on failure
     return jsonify({
         'total_sales': 0,
         'total_transactions': 0,
@@ -121,9 +121,7 @@ def get_stats():
 
 @app.route('/api/recent-activity')
 def get_recent_activity():
-    if not firebase_connected:
-        return jsonify([])
-    
+    """Fetches and formats the 10 most recent activities."""
     try:
         ref = db.reference('/sales')
         sales_data = ref.order_by_child('timestamp').limit_to_last(10).get()
@@ -133,23 +131,15 @@ def get_recent_activity():
             for key, value in sales_data.items():
                 activity.append({
                     'type': 'sale',
-                    'message': f"Sale #{value.get('sale_id', '')} - KES {float(value.get('total_amount', 0)):.2f}",
+                    'message': f"Sale #{value.get('sale_id', '')} - KES {value.get('total_amount', 0):.2f}",
                     'timestamp': value.get('timestamp', '')
                 })
-            return jsonify(activity[::-1])
+            return jsonify(activity[::-1]) # Reverse to show latest first
     except Exception as e:
         print(f"Error fetching activity: {e}")
     
     return jsonify([])
 
-@app.route('/api/health')
-def health_check():
-    return jsonify({
-        'status': 'online',
-        'firebase_connected': firebase_connected,
-        'timestamp': datetime.now().isoformat()
-    })
-
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    # Use 0.0.0.0 and dynamically set PORT for Render deployment compatibility
+    app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
