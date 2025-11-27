@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 # Use the exact database URL from your desktop POS application
-FIREBASE_DATABASE_URL = 'https://console.firebase.google.com/project/heriwadi-bookshop/database/heriwadi-bookshop-default-rtdb/data/~2F'
+FIREBASE_DATABASE_URL = 'https://heriwadi-bookshop-default-rtdb.firebaseio.com/'
 
 # Initialize Firebase
 try:
@@ -143,4 +143,5 @@ def get_recent_activity():
 if __name__ == '__main__':
     # Use 0.0.0.0 and dynamically set PORT for Render deployment compatibility
     app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
+
 
