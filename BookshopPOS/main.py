@@ -22,7 +22,7 @@ class BookshopPOS:
         self.root.geometry("1200x700")
         self.root.configure(bg="#f0f0f0")
         
-        # Firebase configuration
+        # Firebase configuration (Using API Key for POS REST Access)
         self.firebase_config = {
             'apiKey': "AIzaSyCcQMjq4OwxondM8kjKgK4xitjk6QLsdg0",
             'databaseURL': "https://heriwadi-bookshop-default-rtdb.firebaseio.com",
@@ -380,7 +380,7 @@ class BookshopPOS:
             
             change = amount_paid - self.cart_total
             
-            # Save to database
+            # --- 1. LOCAL DATABASE SAVE ---
             sale_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             payment_method = self.payment_var.get()
             items_json = json.dumps(self.cart)
@@ -400,7 +400,7 @@ class BookshopPOS:
             
             self.conn.commit()
             
-            # Sync to Firebase
+            # --- 2. FIREBASE SYNC (In background thread) ---
             firebase_data = {
                 'sale_id': sale_id,
                 'total_amount': self.cart_total,
@@ -408,16 +408,13 @@ class BookshopPOS:
                 'items': self.cart,
                 'timestamp': datetime.now().isoformat()
             }
-            self.sync_to_firebase('sale', firebase_data)
+            # Start sync in a separate thread
+            threading.Thread(target=self.sync_sale, args=(firebase_data,), daemon=True).start()
             
-            # -----------------------------------------------
-            # PRINTING LOGIC
-            # -----------------------------------------------
-            # 1. Save text file (backup)
+            # --- 3. PRINTING LOGIC ---
             receipt_path = self.save_receipt_to_file(sale_id, sale_date, payment_method, 
                                              amount_paid, change)
             
-            # 2. PRINT TO THERMAL PRINTER
             print_status = self.print_receipt_to_hardware(sale_id, sale_date, payment_method, amount_paid, change)
             
             # Success message
@@ -433,7 +430,7 @@ class BookshopPOS:
 
             messagebox.showinfo("Success", success_msg)
             
-            # Clear cart
+            # Clear cart and refresh inventory
             self.clear_cart()
             self.refresh_inventory()
             
@@ -442,6 +439,71 @@ class BookshopPOS:
         except Exception as e:
             self.conn.rollback()
             messagebox.showerror("Error", f"Sale failed: {str(e)}")
+            
+    # NOTE: The sync and summary functions are moved outside the complete_sale method
+    # and placed at the same indentation level as other class methods.
+    
+    def sync_sale(self, data):
+        """Sync a single sale and update the daily summary."""
+        if not self.firebase_connected:
+            print("⚠️ Firebase not connected - skipping sync")
+            return
+
+        try:
+            # 1. Sync Sale Record
+            sale_id = data['sale_id']
+            # Use .json endpoint for Firebase REST API
+            url = f"{self.firebase_config['databaseURL']}/sales/{sale_id}.json"
+            
+            # Add authentication parameter
+            params = {'auth': self.firebase_config['apiKey']}
+            
+            # Send data
+            response = requests.put(url, json=data, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                print(f"✅ Sale {sale_id} synced to Firebase")
+                # 2. Update Summary
+                self.update_sales_summary(data)
+            else:
+                print(f"❌ Firebase sale sync failed: {response.status_code}. Response: {response.text}")
+                    
+        except requests.exceptions.Timeout:
+            print("❌ Firebase sync timeout - check internet connection")
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Firebase sync error: {e}")
+        except Exception as e:
+            print(f"❌ Unexpected sync error: {e}")
+
+    def update_sales_summary(self, sale_data):
+        """Update daily sales summary with better error handling."""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            url = f"{self.firebase_config['databaseURL']}/daily_sales/{today}.json"
+            params = {'auth': self.firebase_config['apiKey']}
+            
+            # Get current summary
+            response = requests.get(url, params=params, timeout=10)
+            current = response.json() or {'total_sales': 0, 'transaction_count': 0}
+            
+            # Update summary
+            updated = {
+                'total_sales': current.get('total_sales', 0) + sale_data['total_amount'],
+                'transaction_count': current.get('transaction_count', 0) + 1,
+                'last_updated': datetime.now().isoformat()
+            }
+            
+            # Save updated summary
+            response = requests.put(url, json=updated, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                print(f"✅ Daily summary updated: {updated}")
+            else:
+                print(f"❌ Summary update failed: {response.text}")
+                
+        except Exception as e:
+            print(f"❌ Summary update error: {e}")
+
 
     def print_receipt_to_hardware(self, sale_id, sale_date, payment_method, amount_paid, change):
         """Send receipt data directly to the Windows Printer"""
@@ -565,72 +627,6 @@ class BookshopPOS:
         
         return filename
 
-    def sync_to_firebase(self, data_type, data):
-    """Sync data to Firebase using REST API with proper error handling"""
-    if not self.firebase_connected:
-        print("⚠️ Firebase not connected - skipping sync")
-        return
-    
-    def sync_thread():
-        try:
-            if data_type == 'sale':
-                # Use .json endpoint for Firebase REST API
-                url = f"{self.firebase_config['databaseURL']}/sales/{data['sale_id']}.json"
-                
-                # Add authentication parameter
-                params = {'auth': self.firebase_config['apiKey']}
-                
-                # Send data
-                response = requests.put(url, json=data, params=params, timeout=10)
-                
-                if response.status_code == 200:
-                    print(f"✅ Sale {data['sale_id']} synced to Firebase")
-                    print(f"   URL: {url}")
-                    print(f"   Data: {json.dumps(data, indent=2)}")
-                    self.update_sales_summary(data)
-                else:
-                    print(f"❌ Firebase sync failed: {response.status_code}")
-                    print(f"   Response: {response.text}")
-                    
-        except requests.exceptions.Timeout:
-            print("❌ Firebase sync timeout - check internet connection")
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Firebase sync error: {e}")
-        except Exception as e:
-            print(f"❌ Unexpected sync error: {e}")
-    
-    thread = threading.Thread(target=sync_thread)
-    thread.daemon = True
-    thread.start()
-
-    def update_sales_summary(self, sale_data):
-    """Update daily sales summary with better error handling"""
-    try:
-        today = datetime.now().strftime('%Y-%m-%d')
-        url = f"{self.firebase_config['databaseURL']}/daily_sales/{today}.json"
-        params = {'auth': self.firebase_config['apiKey']}
-        
-        # Get current summary
-        response = requests.get(url, params=params, timeout=10)
-        current = response.json() or {'total_sales': 0, 'transaction_count': 0}
-        
-        # Update summary
-        updated = {
-            'total_sales': current.get('total_sales', 0) + sale_data['total_amount'],
-            'transaction_count': current.get('transaction_count', 0) + 1,
-            'last_updated': datetime.now().isoformat()
-        }
-        
-        # Save updated summary
-        response = requests.put(url, json=updated, params=params, timeout=10)
-        
-        if response.status_code == 200:
-            print(f"✅ Daily summary updated: {updated}")
-        else:
-            print(f"❌ Summary update failed: {response.text}")
-            
-    except Exception as e:
-        print(f"❌ Summary update error: {e}")
     def clear_cart(self):
         """Clear shopping cart"""
         self.cart = []
