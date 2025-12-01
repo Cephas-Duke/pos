@@ -22,7 +22,7 @@ class BookshopPOS:
         self.root.geometry("1200x700")
         self.root.configure(bg="#f0f0f0")
         
-        # Firebase configuration (Using API Key for POS REST Access)
+        # Firebase configuration
         self.firebase_config = {
             'apiKey': "AIzaSyCcQMjq4OwxondM8kjKgK4xitjk6QLsdg0",
             'databaseURL': "https://heriwadi-bookshop-default-rtdb.firebaseio.com",
@@ -408,8 +408,8 @@ class BookshopPOS:
                 'items': self.cart,
                 'timestamp': datetime.now().isoformat()
             }
-            # Start sync in a separate thread
-            threading.Thread(target=self.sync_sale, args=(firebase_data,), daemon=True).start()
+            # Start sync in a separate thread to prevent GUI freezing
+            threading.Thread(target=self.sync_sale_in_background, args=(firebase_data,), daemon=True).start()
             
             # --- 3. PRINTING LOGIC ---
             receipt_path = self.save_receipt_to_file(sale_id, sale_date, payment_method, 
@@ -439,12 +439,16 @@ class BookshopPOS:
         except Exception as e:
             self.conn.rollback()
             messagebox.showerror("Error", f"Sale failed: {str(e)}")
-            
-    # NOTE: The sync and summary functions are moved outside the complete_sale method
-    # and placed at the same indentation level as other class methods.
     
-    def sync_sale(self, data):
-        """Sync a single sale and update the daily summary."""
+    # =======================================================
+    # CORRECTED FIREBASE SYNC FUNCTIONS (Indentation Fixed)
+    # =======================================================
+
+    def sync_sale_in_background(self, data):
+        """
+        Sync a single sale to Firebase using the REST API in a background thread.
+        This replaces the old sync_to_firebase logic.
+        """
         if not self.firebase_connected:
             print("⚠️ Firebase not connected - skipping sync")
             return
@@ -484,7 +488,8 @@ class BookshopPOS:
             
             # Get current summary
             response = requests.get(url, params=params, timeout=10)
-            current = response.json() or {'total_sales': 0, 'transaction_count': 0}
+            # Handle empty response (new day)
+            current = response.json() if response.status_code == 200 and response.json() else {'total_sales': 0, 'transaction_count': 0}
             
             # Update summary
             updated = {
@@ -503,7 +508,10 @@ class BookshopPOS:
                 
         except Exception as e:
             print(f"❌ Summary update error: {e}")
-
+            
+    # =======================================================
+    # REST OF CLASS METHODS
+    # =======================================================
 
     def print_receipt_to_hardware(self, sale_id, sale_date, payment_method, amount_paid, change):
         """Send receipt data directly to the Windows Printer"""
@@ -519,7 +527,6 @@ class BookshopPOS:
             raw_data += ESC + b'a' + b'\x01'
             
             # Title (Bold + Double Height)
-            # FIX: We use a string and encode it, rather than encoding bytes
             raw_data += ESC + b'!' + b'\x10' + "HERIWADI BOOKSHOP\n".encode('utf-8')
             raw_data += ESC + b'!' + b'\x00' # Reset font
             
