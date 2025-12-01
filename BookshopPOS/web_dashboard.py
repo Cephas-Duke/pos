@@ -2,30 +2,56 @@ from flask import Flask, render_template, jsonify, request
 import firebase_admin
 from firebase_admin import credentials, db
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
+import sys
 
 app = Flask(__name__)
 
+# --- CONFIGURATION ---
+FIREBASE_DATABASE_URL = 'https://heriwadi-bookshop-default-rtdb.firebaseio.com/'
+
 # Initialize Firebase
 try:
-    cred = credentials.Certificate('path/to/your/firebase-service-account-key.json')
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://your-project-id.firebaseio.com/'
-    })
-except:
-    print("Firebase initialization failed - using mock data")
+    cred_json_str = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+    
+    if cred_json_str:
+        cred_info = json.loads(cred_json_str)
+        cred = credentials.Certificate(cred_info)
+        
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': FIREBASE_DATABASE_URL
+        })
+        print("✅ Firebase initialized successfully from Environment Variable.")
+        
+    else:
+        print("⚠️ FIREBASE_CREDENTIALS_JSON environment variable not found.")
+        print("🔴 Dashboard will fail to fetch live data. Please check Render configuration.")
+        # Don't exit in production - allow app to start
+        # sys.exit(1) 
+        
+except Exception as e:
+    print(f"❌ Firebase initialization failed: {e}")
+    import traceback
+    traceback.print_exc()
+    # Don't exit - let app start anyway
+    # sys.exit(1)
+
+# --- FLASK ROUTES ---
 
 @app.route('/')
 def dashboard():
-    return render_template('dashboard.html')
+    """Renders the main dashboard HTML template."""
+    return render_template('index.html')
 
 @app.route('/api/sales')
 def get_sales():
+    """Fetches and formats recent sales for the activity feed."""
     try:
-        # Get sales data from Firebase
         ref = db.reference('/sales')
         sales_data = ref.order_by_child('timestamp').limit_to_last(50).get()
+        
+        print(f"📊 Sales data fetched: {type(sales_data)}, Count: {len(sales_data) if sales_data else 0}")
         
         if sales_data:
             sales = []
@@ -37,24 +63,26 @@ def get_sales():
                     'timestamp': value.get('timestamp', ''),
                     'items_count': len(value.get('items', []))
                 })
-            return jsonify(sales[::-1])  # Reverse to show latest first
+            print(f"✅ Returning {len(sales)} sales")
+            return jsonify(sales[::-1])
     except Exception as e:
-        print(f"Error fetching sales: {e}")
+        print(f"❌ Error fetching sales: {e}")
+        import traceback
+        traceback.print_exc()
     
-    # Return empty array if no data
     return jsonify([])
 
 @app.route('/api/stats')
 def get_stats():
-    """Calculates and returns total sales, transactions, and today's sales"""
+    """Calculates and returns total sales, transactions, and today's sales."""
     try:
         ref = db.reference('/sales')
         sales_data = ref.get()
         
-        print(f"📊 Fetched sales data: {sales_data}")  # Debug log
+        print(f"📊 Stats - Sales data type: {type(sales_data)}")
         
         if not sales_data:
-            print("⚠️ No sales data in Firebase")
+            print("⚠️ No sales data found")
             return jsonify({
                 'total_sales': 0,
                 'total_transactions': 0,
@@ -83,40 +111,28 @@ def get_stats():
                     print(f"⚠️ Invalid timestamp '{timestamp_str}': {e}")
         
         result = {
-            'total_sales': total_sales,
+            'total_sales': round(total_sales, 2),
             'total_transactions': total_transactions,
-            'today_sales': today_sales
+            'today_sales': round(today_sales, 2)
         }
         
-        print(f"✅ Stats calculated: {result}")
+        print(f"✅ Stats: {result}")
         return jsonify(result)
         
     except Exception as e:
         print(f"❌ Error fetching stats: {e}")
         import traceback
         traceback.print_exc()
-        
-        return jsonify({
-            'total_sales': 0,
-            'total_transactions': 0,
-            'today_sales': 0
-        })
-```
-
-**5. Testing Steps:**
-
-1. **Update Firebase Rules** (as shown above)
-
-2. **Test Desktop POS:**
-   - Run `main.py`
-   - Make a test sale
-   - Check console output - you should see:
-```
-     ✅ Sale X synced to Firebase
-     ✅ Daily summary updated
+    
+    return jsonify({
+        'total_sales': 0,
+        'total_transactions': 0,
+        'today_sales': 0
+    })
 
 @app.route('/api/recent-activity')
 def get_recent_activity():
+    """Fetches and formats the 10 most recent activities."""
     try:
         ref = db.reference('/sales')
         sales_data = ref.order_by_child('timestamp').limit_to_last(10).get()
@@ -131,9 +147,41 @@ def get_recent_activity():
                 })
             return jsonify(activity[::-1])
     except Exception as e:
-        print(f"Error fetching activity: {e}")
+        print(f"❌ Error fetching activity: {e}")
+        import traceback
+        traceback.print_exc()
     
     return jsonify([])
 
+@app.route('/api/debug')
+def debug():
+    """Debug endpoint to check Firebase data structure"""
+    try:
+        sales_ref = db.reference('/sales')
+        sales_data = sales_ref.get()
+        
+        summary_ref = db.reference('/daily_sales')
+        summary_data = summary_ref.get()
+        
+        return jsonify({
+            'sales_count': len(sales_data) if sales_data else 0,
+            'sales_sample': list(sales_data.values())[:2] if sales_data else [],
+            'daily_summary': summary_data,
+            'firebase_url': FIREBASE_DATABASE_URL,
+            'env_var_set': bool(os.environ.get('FIREBASE_CREDENTIALS_JSON'))
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        })
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
