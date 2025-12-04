@@ -6,23 +6,149 @@ import json
 import os
 import requests
 import threading
-import win32print # Required for printing
+import csv
+import hashlib 
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# YOUR EXACT PRINTER NAME
 PRINTER_NAME = "BTP-R880NP(U) 1" 
 # ==========================================
 
-class BookshopPOS:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("HERIWADI BOOKSHOP - POS System")
-        self.root.geometry("1200x700")
-        self.root.configure(bg="#f0f0f0")
+# --- DATABASE SETUP FUNCTION (Runs before App starts) ---
+def initialize_database():
+    conn = sqlite3.connect('bookshop.db')
+    cursor = conn.cursor()
+    
+    # 1. Create Products Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku TEXT UNIQUE, 
+            title TEXT NOT NULL,
+            author_supplier TEXT, 
+            category TEXT,
+            product_type TEXT NOT NULL DEFAULT 'Book', 
+            price REAL NOT NULL,
+            cost_price REAL DEFAULT 0.0, 
+            stock INTEGER NOT NULL,
+            date_added TEXT
+        )
+    ''')
+    
+    # 2. Create Sales Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_date TEXT NOT NULL,
+            total_amount REAL NOT NULL,
+            total_profit REAL DEFAULT 0.0, 
+            payment_method TEXT,
+            items_json TEXT 
+        )
+    ''')
+    
+    # 3. Create Users Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            role TEXT
+        )
+    ''')
+    
+    # 4. Seed Default Users if table is empty
+    cursor.execute("SELECT count(*) FROM users")
+    if cursor.fetchone()[0] == 0:
+        admin_pw = hashlib.sha256("admin123".encode()).hexdigest()
+        user_pw = hashlib.sha256("user123".encode()).hexdigest()
         
-        # Firebase configuration
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
+                            ("admin", admin_pw, "Director"))
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
+                            ("user", user_pw, "Attendant"))
+        conn.commit()
+        print("✅ Default users created successfully. (Director: admin/admin123, Attendant: user/user123)")
+    
+    conn.commit()
+    conn.close()
+    print("✅ Database initialized successfully.")
+
+# ==========================================
+# LOGIN WINDOW
+# ==========================================
+class LoginWindow:
+    def __init__(self, root, on_login_success):
+        self.root = root
+        self.on_login_success = on_login_success
+        
+        self.root.title("🔐 Login - HERIWADI BOOKSHOP")
+        self.root.geometry("1000x600") 
+        
+        # Container frame
+        self.login_frame = tk.Frame(root, bg="#2b2b2b")
+        self.login_frame.pack(expand=True, fill='both')
+        
+        # Center Box
+        center_frame = tk.Frame(self.login_frame, bg="#2b2b2b")
+        center_frame.place(relx=0.5, rely=0.5, anchor='center')
+        
+        tk.Label(center_frame, text="HERIWADI POS", font=('Segoe UI', 24, 'bold'), bg="#2b2b2b", fg="#4CAF50").pack(pady=(0, 40))
+        
+        # Username
+        tk.Label(center_frame, text="Username:", font=('Segoe UI', 12), bg="#2b2b2b", fg="#cccccc").pack(anchor='w', fill='x')
+        self.user_entry = ttk.Entry(center_frame, font=('Segoe UI', 14), width=30)
+        self.user_entry.pack(pady=(5, 20))
+        self.user_entry.focus()
+        
+        # Password
+        tk.Label(center_frame, text="Password:", font=('Segoe UI', 12), bg="#2b2b2b", fg="#cccccc").pack(anchor='w', fill='x')
+        self.pass_entry = ttk.Entry(center_frame, font=('Segoe UI', 14), width=30, show="•")
+        self.pass_entry.pack(pady=(5, 30))
+        self.pass_entry.bind('<Return>', self.attempt_login)
+        
+        # Login Button
+        btn = tk.Button(center_frame, text="LOGIN", command=self.attempt_login, 
+                        bg="#2196F3", fg="white", font=('Segoe UI', 12, 'bold'), 
+                        relief='flat', padx=20, pady=12, cursor="hand2")
+        btn.pack(fill='x')
+        
+        # HINTS REMOVED
+
+    def attempt_login(self, event=None):
+        username = self.user_entry.get().strip()
+        password = self.pass_entry.get().strip()
+        
+        hashed_pw = hashlib.sha256(password.encode()).hexdigest()
+        
+        conn = sqlite3.connect('bookshop.db')
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT role FROM users WHERE username=? AND password_hash=?", (username, hashed_pw))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            role = result[0]
+            self.login_frame.destroy() 
+            self.on_login_success(username, role)
+        else:
+            messagebox.showerror("Login Failed", "Invalid Username or Password")
+
+# ==========================================
+# MAIN POS APPLICATION
+# ==========================================
+class BookshopPOS:
+    def __init__(self, root, username, role):
+        self.root = root
+        self.current_user = username
+        self.current_role = role 
+        
+        self.root.title(f"📚 HERIWADI BOOKSHOP POS | Logged in as: {username.upper()} ({role})")
+        self.root.geometry("1300x750")
+        
+        # Firebase config (omitted for brevity)
         self.firebase_config = {
             'apiKey': "AIzaSyCcQMjq4OwxondM8kjKgK4xitjk6QLsdg0",
             'databaseURL': "https://heriwadi-bookshop-default-rtdb.firebaseio.com",
@@ -32,715 +158,515 @@ class BookshopPOS:
             'appId': "1:1009993842704:web:c308ea85000df2f72eca95"
         }
         
-        # Initialize database
-        self.init_database()
-        self.init_firebase()
-        
-        # Cart items
-        self.cart = []
-        self.cart_total = 0.0
-        
-        # Create UI
-        self.create_ui()
-        
-        # Load books
-        self.refresh_inventory()
-        
-        print("HERIWADI BOOKSHOP POS System started successfully!")
-        if self.firebase_connected:
-            print("✅ Firebase connection ready")
-        else:
-            print("⚠️  Firebase not connected - running in offline mode")
-
-    def init_database(self):
-        """Initialize SQLite database"""
         self.conn = sqlite3.connect('bookshop.db')
         self.cursor = self.conn.cursor()
         
-        # Create books table
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS books (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                isbn TEXT UNIQUE,
-                title TEXT NOT NULL,
-                author TEXT,
-                category TEXT,
-                price REAL NOT NULL,
-                stock INTEGER NOT NULL,
-                date_added TEXT
-            )
-        ''')
+        self.init_firebase()
         
-        # Create sales table
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sales (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sale_date TEXT NOT NULL,
-                total_amount REAL NOT NULL,
-                payment_method TEXT,
-                items_json TEXT
-            )
-        ''')
+        self.cart = []
+        self.cart_total = 0.0
         
-        self.conn.commit()
-        print("✅ Database initialized")
+        self.create_ui()
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
+        self.refresh_inventory()
 
     def init_firebase(self):
-        """Initialize Firebase connection"""
         try:
-            if (self.firebase_config['databaseURL'] and 
-                self.firebase_config['apiKey']):
-                
+            if (self.firebase_config['databaseURL'] and self.firebase_config['apiKey']):
                 self.firebase_connected = True
-                print(f"✅ Connected to Firebase: {self.firebase_config['databaseURL']}")
             else:
                 self.firebase_connected = False
-                print("❌ Invalid Firebase configuration")
-                
-        except Exception as e:
-            print(f"Firebase initialization error: {e}")
+        except:
             self.firebase_connected = False
+            
+    def on_tab_change(self, event):
+        selected_tab = self.notebook.tab(self.notebook.select(), "text")
+        if "Reports" in selected_tab:
+            self.generate_report()
+        elif "Inventory" in selected_tab:
+            self.refresh_inventory()
 
+    # FIX: Ensure all tabs are created unconditionally here
     def create_ui(self):
-        """Create the user interface"""
-        # Create notebook (tabs)
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Create tabs
         self.create_sales_tab()
-        self.create_inventory_tab()
-        self.create_reports_tab()
+        self.create_inventory_tab() # Now always called
+        self.create_reports_tab()   # Now always called
 
+    # =========================================================================
+    # 🛒 SALES TAB (UNCHANGED)
+    # =========================================================================
     def create_sales_tab(self):
-        """Create the sales/POS tab"""
         sales_frame = ttk.Frame(self.notebook)
-        self.notebook.add(sales_frame, text="Sales / POS")
+        self.notebook.add(sales_frame, text="🛒 POS Terminal")
         
-        # Left side - Product search and cart
         left_frame = ttk.Frame(sales_frame)
         left_frame.pack(side='left', fill='both', expand=True, padx=10, pady=10)
         
-        # Search section
-        search_frame = ttk.LabelFrame(left_frame, text="Search Book", padding=10)
+        # Search
+        search_frame = ttk.LabelFrame(left_frame, text="🔍 Product Search", padding=10)
         search_frame.pack(fill='x', pady=(0, 10))
         
-        ttk.Label(search_frame, text="ISBN or Title:").pack(side='left', padx=5)
+        ttk.Label(search_frame, text="SKU / Title:").pack(side='left', padx=5)
         self.search_entry = ttk.Entry(search_frame, width=30)
         self.search_entry.pack(side='left', padx=5)
-        self.search_entry.bind('<Return>', lambda e: self.search_book())
+        self.search_entry.bind('<Return>', lambda e: self.search_product())
         
-        ttk.Button(search_frame, text="Search", command=self.search_book).pack(side='left', padx=5)
+        tk.Button(search_frame, text="SEARCH", command=self.search_product, 
+                  bg="#2196F3", fg="white", relief="flat").pack(side='left', padx=5)
         
-        # Search results
-        self.search_results_frame = ttk.LabelFrame(left_frame, text="Search Results", padding=10)
+        # Results Tree
+        self.search_results_frame = ttk.LabelFrame(left_frame, text="Available Products", padding=10)
         self.search_results_frame.pack(fill='both', expand=True, pady=(0, 10))
         
         self.search_tree = ttk.Treeview(self.search_results_frame, 
-                                        columns=('ISBN', 'Title', 'Author', 'Price', 'Stock'),
-                                        show='headings', height=8)
+                                        columns=('SKU', 'Title', 'Type', 'Price', 'Stock'),
+                                        show='headings', height=10)
         
-        self.search_tree.heading('ISBN', text='ISBN')
+        self.search_tree.heading('SKU', text='SKU')
         self.search_tree.heading('Title', text='Title')
-        self.search_tree.heading('Author', text='Author')
+        self.search_tree.heading('Type', text='Type')
         self.search_tree.heading('Price', text='Price')
         self.search_tree.heading('Stock', text='Stock')
         
-        self.search_tree.column('ISBN', width=100)
+        self.search_tree.column('SKU', width=80)
         self.search_tree.column('Title', width=200)
-        self.search_tree.column('Author', width=150)
+        self.search_tree.column('Type', width=80)
         self.search_tree.column('Price', width=80)
         self.search_tree.column('Stock', width=60)
         
         self.search_tree.pack(fill='both', expand=True)
         self.search_tree.bind('<Double-1>', lambda e: self.add_to_cart())
         
-        ttk.Button(left_frame, text="Add to Cart", command=self.add_to_cart).pack(pady=5)
+        tk.Button(left_frame, text="➕ ADD TO CART", command=self.add_to_cart, 
+                  bg="#FFC107", fg="black", font=('Segoe UI', 10, 'bold'), relief="flat").pack(pady=5, fill='x')
         
-        # Right side - Cart and payment
+        # Right Frame (Cart)
         right_frame = ttk.Frame(sales_frame)
         right_frame.pack(side='right', fill='both', expand=True, padx=10, pady=10)
         
-        # Cart
-        cart_frame = ttk.LabelFrame(right_frame, text="Shopping Cart", padding=10)
+        cart_frame = ttk.LabelFrame(right_frame, text="🛒 Shopping Cart", padding=10)
         cart_frame.pack(fill='both', expand=True, pady=(0, 10))
         
-        self.cart_text = scrolledtext.ScrolledText(cart_frame, height=15, width=50)
+        self.cart_text = scrolledtext.ScrolledText(cart_frame, height=15, width=45, bg="#383838", fg="white", font=('Consolas', 11))
         self.cart_text.pack(fill='both', expand=True)
         
-        # Total
-        total_frame = ttk.Frame(right_frame)
-        total_frame.pack(fill='x', pady=(0, 10))
+        # Total Display
+        total_frame = tk.Frame(right_frame, bg="#222222")
+        total_frame.pack(fill='x', pady=10)
         
-        ttk.Label(total_frame, text="TOTAL:", font=('Arial', 14, 'bold')).pack(side='left', padx=5)
-        self.total_label = ttk.Label(total_frame, text="KES 0.00", 
-                                     font=('Arial', 16, 'bold'), foreground='green')
-        self.total_label.pack(side='left', padx=5)
+        tk.Label(total_frame, text="TOTAL TO PAY:", font=('Segoe UI', 14), bg="#222222", fg="#aaaaaa").pack(anchor='w')
+        self.total_label = tk.Label(total_frame, text="KES 0.00", font=('Segoe UI', 24, 'bold'), bg="#222222", fg="#4CAF50")
+        self.total_label.pack(anchor='e')
         
-        # Payment section
-        payment_frame = ttk.LabelFrame(right_frame, text="Payment", padding=10)
-        payment_frame.pack(fill='x')
+        # Payment
+        pay_frame = ttk.LabelFrame(right_frame, text="Payment Details", padding=10)
+        pay_frame.pack(fill='x', pady=10)
         
-        ttk.Label(payment_frame, text="Payment Method:").grid(row=0, column=0, sticky='w', pady=5)
+        ttk.Label(pay_frame, text="Method:").grid(row=0, column=0, pady=5, sticky='w')
         self.payment_var = tk.StringVar(value="Cash")
-        payment_combo = ttk.Combobox(payment_frame, textvariable=self.payment_var,
-                                     values=["Cash", "M-Pesa", "Card"], state='readonly', width=20)
-        payment_combo.grid(row=0, column=1, pady=5)
+        ttk.Combobox(pay_frame, textvariable=self.payment_var, values=["Cash", "M-Pesa", "Card"], state="readonly").grid(row=0, column=1, padx=5, sticky='ew')
         
-        ttk.Label(payment_frame, text="Amount Paid:").grid(row=1, column=0, sticky='w', pady=5)
-        self.amount_paid_entry = ttk.Entry(payment_frame, width=22)
-        self.amount_paid_entry.grid(row=1, column=1, pady=5)
+        ttk.Label(pay_frame, text="Amount Paid:").grid(row=1, column=0, pady=5, sticky='w')
+        self.amount_paid_entry = ttk.Entry(pay_frame)
+        self.amount_paid_entry.grid(row=1, column=1, padx=5, sticky='ew')
         self.amount_paid_entry.bind('<KeyRelease>', self.calculate_change)
         
-        ttk.Label(payment_frame, text="Change:").grid(row=2, column=0, sticky='w', pady=5)
-        self.change_label = ttk.Label(payment_frame, text="KES 0.00", 
-                                      font=('Arial', 12, 'bold'), foreground='#4CAF50')
-        self.change_label.grid(row=2, column=1, sticky='w', pady=5)
+        self.change_label = tk.Label(pay_frame, text="Change: KES 0.00", bg="#2b2b2b", fg="#FFC107", font=('Segoe UI', 11, 'bold'))
+        self.change_label.grid(row=2, column=0, columnspan=2, pady=10)
         
-        # Buttons
-        button_frame = ttk.Frame(right_frame)
-        button_frame.pack(fill='x', pady=10)
+        # Checkout Buttons
+        btn_frame = tk.Frame(right_frame, bg="#2b2b2b")
+        btn_frame.pack(fill='x')
         
-        ttk.Button(button_frame, text="Complete Sale", 
-                   command=self.complete_sale).pack(side='left', padx=5, fill='x', expand=True)
-        ttk.Button(button_frame, text="Clear Cart", 
-                   command=self.clear_cart).pack(side='left', padx=5, fill='x', expand=True)
+        tk.Button(btn_frame, text="✅ COMPLETE SALE", command=self.complete_sale, 
+                  bg="#4CAF50", fg="white", font=('Segoe UI', 12, 'bold'), relief="flat", pady=10).pack(side='left', fill='x', expand=True, padx=(0, 5))
+        
+        tk.Button(btn_frame, text="❌ CLEAR", command=self.clear_cart, 
+                  bg="#F44336", fg="white", font=('Segoe UI', 12, 'bold'), relief="flat", pady=10).pack(side='left', fill='x', expand=True, padx=(5, 0))
 
+    # =========================================================================
+    # 📦 INVENTORY TAB (ROLE ACCESS)
+    # =========================================================================
     def create_inventory_tab(self):
-        """Create inventory management tab"""
         inventory_frame = ttk.Frame(self.notebook)
-        self.notebook.add(inventory_frame, text="Inventory")
+        self.notebook.add(inventory_frame, text="📦 Inventory")
         
-        # Form for adding books
-        form_frame = ttk.LabelFrame(inventory_frame, text="Add/Edit Book", padding=10)
+        form_frame = ttk.LabelFrame(inventory_frame, text="Item Details", padding=10)
         form_frame.pack(fill='x', padx=10, pady=10)
         
         self.inventory_entries = {}
         fields = [
-            ('ISBN', 'isbn'),
-            ('Title', 'title'),
-            ('Author', 'author'),
-            ('Category', 'category'),
-            ('Price (KES)', 'price'),
-            ('Stock', 'stock')
+            ('SKU (Item Code)', 'sku', 'entry', 0),
+            ('Title', 'title', 'entry', 0),
+            ('Author/Supplier', 'author_supplier', 'entry', 1),
+            ('Category', 'category', 'entry', 1),
+            ('Type', 'product_type', 'combo', 2),
+            ('Price (Selling)', 'price', 'entry', 2),
+            ('Cost Price', 'cost_price', 'entry', 3), # Hidden from attendant below
+            ('Stock Qty', 'stock', 'entry', 3)
         ]
         
-        for i, (label, key) in enumerate(fields):
-            ttk.Label(form_frame, text=f"{label}:").grid(row=i//2, column=(i%2)*2, 
-                                                        sticky='w', padx=5, pady=5)
-            entry = ttk.Entry(form_frame, width=25)
-            entry.grid(row=i//2, column=(i%2)*2+1, padx=5, pady=5)
+        # Configure columns for layout
+        for i in range(4): form_frame.columnconfigure(i, weight=1)
+
+        # Create Input Fields
+        for i, (label, key, widget_type, row_num) in enumerate(fields):
+            # Hide Cost Price input fields for Attendant
+            if key == 'cost_price' and self.current_role == "Attendant":
+                continue 
+            
+            col_idx = (i % 2) * 2
+            ttk.Label(form_frame, text=label).grid(row=row_num, column=col_idx, sticky='w', padx=5, pady=5)
+            
+            if widget_type == 'combo':
+                entry = ttk.Combobox(form_frame, values=["Book", "Stationery", "Other"], state='readonly')
+            else:
+                entry = ttk.Entry(form_frame)
+            
+            entry.grid(row=row_num, column=col_idx+1, sticky='ew', padx=5, pady=5)
             self.inventory_entries[key] = entry
+
+        # --- ACTION BUTTONS ---
+        btn_frame = tk.Frame(form_frame, bg="#2b2b2b")
+        btn_frame.grid(row=4, column=0, columnspan=4, pady=15)
         
-        button_frame = ttk.Frame(form_frame)
-        button_frame.grid(row=3, column=0, columnspan=4, pady=10)
+        self.btn_new = tk.Button(btn_frame, text="✨ RESET FORM", command=self.reset_form_for_new,
+                                 bg="#9E9E9E", fg="white", relief="flat", padx=15)
+        self.btn_add = tk.Button(btn_frame, text="➕ ADD ITEM", command=self.add_product,
+                                 bg="#4CAF50", fg="white", relief="flat", padx=15)
+        self.btn_update = tk.Button(btn_frame, text="💾 UPDATE", command=self.update_product,
+                                    bg="#2196F3", fg="white", relief="flat", padx=15)
+        self.btn_delete = tk.Button(btn_frame, text="🗑️ DELETE", command=self.delete_product,
+                                    bg="#F44336", fg="white", relief="flat", padx=15)
+
+        self.btn_new.pack(side='left', padx=5)
+        self.btn_add.pack(side='left', padx=5)
+        self.btn_update.pack(side='left', padx=5)
+        self.btn_delete.pack(side='left', padx=5)
         
-        ttk.Button(button_frame, text="Add Book", command=self.add_book).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="Clear Form", 
-                   command=self.clear_inventory_form).pack(side='left', padx=5)
-        
-        # Inventory list
-        list_frame = ttk.LabelFrame(inventory_frame, text="Current Inventory", padding=10)
+        # Access Control: Disable inputs and buttons for Attendant
+        if self.current_role == "Attendant":
+            self.btn_new.config(state="disabled", bg="#444444")
+            self.btn_add.config(state="disabled", bg="#444444")
+            self.btn_update.config(state="disabled", bg="#444444")
+            self.btn_delete.config(state="disabled", bg="#444444")
+            for key, entry in self.inventory_entries.items():
+                entry.config(state='disabled')
+            tk.Label(form_frame, text="🔒 RESTRICTED ACCESS: View Only", fg="#F44336", bg="#2b2b2b").grid(row=5, column=0, columnspan=4)
+
+        list_frame = ttk.LabelFrame(inventory_frame, text="Stock List", padding=10)
         list_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
-        self.inventory_tree = ttk.Treeview(list_frame,
-                                           columns=('ISBN', 'Title', 'Author', 'Category', 
-                                                    'Price', 'Stock'),
+        self.inventory_tree = ttk.Treeview(list_frame, 
+                                           columns=('SKU', 'Title', 'Type', 'Category', 'Price', 'Cost', 'Stock'),
                                            show='headings')
         
-        for col in ('ISBN', 'Title', 'Author', 'Category', 'Price', 'Stock'):
-            self.inventory_tree.heading(col, text=col)
-            self.inventory_tree.column(col, width=100 if col != 'Title' else 200)
+        headers = ['SKU', 'Title', 'Type', 'Category', 'Price', 'Cost', 'Stock']
+        for h in headers:
+            self.inventory_tree.heading(h, text=h)
+            self.inventory_tree.column(h, width=100)
+        self.inventory_tree.column('Title', width=250)
         
-        scrollbar = ttk.Scrollbar(list_frame, orient='vertical', 
-                                  command=self.inventory_tree.yview)
-        self.inventory_tree.configure(yscrollcommand=scrollbar.set)
+        # Hide Cost column entirely for Attendant
+        if self.current_role == "Attendant":
+             self.inventory_tree.heading('Cost', text='')
+             self.inventory_tree.column('Cost', width=0, stretch=False)
         
         self.inventory_tree.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
-
+        
+        scroll = ttk.Scrollbar(list_frame, command=self.inventory_tree.yview)
+        scroll.pack(side='right', fill='y')
+        self.inventory_tree.configure(yscrollcommand=scroll.set)
+        
+        # Only Directors/Admins should be able to select and update
+        if self.current_role != "Attendant":
+            self.inventory_tree.bind('<<TreeviewSelect>>', self.on_inventory_select)
+            self.reset_form_for_new()
+        
+    # =========================================================================
+    # 📈 REPORTS TAB (ROLE ACCESS)
+    # =========================================================================
     def create_reports_tab(self):
-        """Create reports tab"""
         reports_frame = ttk.Frame(self.notebook)
-        self.notebook.add(reports_frame, text="Reports")
+        self.notebook.add(reports_frame, text="📈 Reports")
         
-        ttk.Label(reports_frame, text="Sales Reports", 
-                  font=('Arial', 16, 'bold')).pack(pady=20)
+        tool_frame = tk.Frame(reports_frame, bg="#2b2b2b")
+        tool_frame.pack(fill='x', padx=10, pady=10)
         
-        self.reports_text = scrolledtext.ScrolledText(reports_frame, height=20)
-        self.reports_text.pack(fill='both', expand=True, padx=10, pady=10)
+        tk.Button(tool_frame, text="🔄 REFRESH", command=self.generate_report, bg="#2196F3", fg="white", relief="flat").pack(side='left', padx=5)
         
-        ttk.Button(reports_frame, text="Generate Report", 
-                   command=self.generate_report).pack(pady=10)
+        # Only Directors can export/delete sales
+        if self.current_role == "Director":
+            tk.Button(tool_frame, text="📤 EXPORT CSV", command=self.export_sales_to_csv, bg="#FF9800", fg="white", relief="flat").pack(side='left', padx=5)
+            
+            self.btn_del_sale = tk.Button(tool_frame, text="🗑️ DELETE SALE", command=self.delete_sale_prompt, bg="#F44336", fg="white", relief="flat")
+            self.btn_del_sale.pack(side='right', padx=5)
+        
+        split_frame = tk.Frame(reports_frame, bg="#2b2b2b")
+        split_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        self.reports_text = scrolledtext.ScrolledText(split_frame, width=50, bg="#383838", fg="white", font=('Consolas', 10))
+        self.reports_text.pack(side='left', fill='both', expand=True, padx=(0, 5))
+        
+        self.sales_tree = ttk.Treeview(split_frame, columns=('ID', 'Total', 'Date'), show='headings')
+        self.sales_tree.heading('ID', text='ID')
+        self.sales_tree.heading('Total', text='Total')
+        self.sales_tree.heading('Date', text='Date')
+        self.sales_tree.column('ID', width=50)
+        self.sales_tree.pack(side='right', fill='both', expand=True, padx=(5, 0))
+        
+        # Only Directors can delete by double-click
+        if self.current_role == "Director":
+            self.sales_tree.bind('<Double-1>', lambda e: self.delete_sale_prompt())
 
-    def search_book(self):
-        """Search for books"""
-        query = self.search_entry.get().strip()
-        if not query:
-            return
-        
-        for item in self.search_tree.get_children():
-            self.search_tree.delete(item)
-        
-        self.cursor.execute('''
-            SELECT isbn, title, author, price, stock 
-            FROM books 
-            WHERE isbn LIKE ? OR title LIKE ? OR author LIKE ?
-        ''', (f'%{query}%', f'%{query}%', f'%{query}%'))
-        
-        results = self.cursor.fetchall()
-        
-        for row in results:
-            self.search_tree.insert('', 'end', values=row)
-        
-        if not results:
-            messagebox.showinfo("No Results", "No books found matching your search")
+    # =========================================================================
+    # --- LOGIC METHODS ---
+    # =========================================================================
 
-    def add_to_cart(self):
-        """Add selected book to cart"""
-        selection = self.search_tree.selection()
-        if not selection:
-            messagebox.showwarning("No Selection", "Please select a book to add")
-            return
-        
-        item = self.search_tree.item(selection[0])
-        values = item['values']
-        
-        isbn, title, author, price, stock = values
-        
-        if stock <= 0:
-            messagebox.showwarning("Out of Stock", f"{title} is out of stock")
-            return
-        
-        quantity = simpledialog.askinteger(
-            "Enter Quantity",
-            f"Book: {title}\nPrice: KES {price}\nAvailable: {stock}\n\nEnter quantity:",
-            parent=self.root,
-            minvalue=1,
-            maxvalue=stock,
-            initialvalue=1
-        )
-        
-        if quantity is None:
-            return
-        
-        self.cart.append({
-            'isbn': isbn,
-            'title': title,
-            'author': author,
-            'price': float(price),
-            'quantity': quantity
-        })
-        
-        self.update_cart_display()
-        messagebox.showinfo("Success", f"Added {quantity} x {title} to cart!")
-
-    def update_cart_display(self):
-        """Update cart display"""
-        self.cart_text.delete('1.0', 'end')
-        self.cart_total = 0.0
-        
-        for i, item in enumerate(self.cart, 1):
-            subtotal = item['price'] * item['quantity']
-            self.cart_total += subtotal
-            
-            line = f"{i}. {item['title']}\n"
-            line += f"   Price: KES {item['price']:.2f} x {item['quantity']} = KES {subtotal:.2f}\n\n"
-            self.cart_text.insert('end', line)
-        
-        self.total_label.config(text=f"KES {self.cart_total:.2f}")
-        self.calculate_change()
-
-    def calculate_change(self, event=None):
-        """Calculate change"""
-        try:
-            amount_paid = float(self.amount_paid_entry.get() or 0)
-            change = amount_paid - self.cart_total
-            
-            if change >= 0:
-                self.change_label.config(text=f"KES {change:.2f}", foreground='#4CAF50')
-            else:
-                self.change_label.config(text=f"KES {change:.2f}", foreground='red')
-        except ValueError:
-            self.change_label.config(text="KES 0.00", foreground='#4CAF50')
-
-    def complete_sale(self):
-        """Complete the sale and sync to Firebase"""
-        if not self.cart:
-            messagebox.showwarning("Empty Cart", "Please add items to cart")
-            return
-        
-        try:
-            amount_paid = float(self.amount_paid_entry.get() or 0)
-            
-            if amount_paid < self.cart_total:
-                messagebox.showerror("Insufficient Payment",
-                                   f"Amount paid (KES {amount_paid:.2f}) is less than total (KES {self.cart_total:.2f})")
-                return
-            
-            change = amount_paid - self.cart_total
-            
-            # --- 1. LOCAL DATABASE SAVE ---
-            sale_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            payment_method = self.payment_var.get()
-            items_json = json.dumps(self.cart)
-            
-            self.cursor.execute('''
-                INSERT INTO sales (sale_date, total_amount, payment_method, items_json)
-                VALUES (?, ?, ?, ?)
-            ''', (sale_date, self.cart_total, payment_method, items_json))
-            
-            sale_id = self.cursor.lastrowid
-            
-            # Update stock
-            for item in self.cart:
-                self.cursor.execute('''
-                    UPDATE books SET stock = stock - ? WHERE isbn = ?
-                ''', (item['quantity'], item['isbn']))
-            
-            self.conn.commit()
-            
-            # --- 2. FIREBASE SYNC (In background thread) ---
-            firebase_data = {
-                'sale_id': sale_id,
-                'total_amount': self.cart_total,
-                'payment_method': payment_method,
-                'items': self.cart,
-                'timestamp': datetime.now().isoformat()
-            }
-            # Start sync in a separate thread to prevent GUI freezing
-            threading.Thread(target=self.sync_sale_in_background, args=(firebase_data,), daemon=True).start()
-            
-            # --- 3. PRINTING LOGIC ---
-            receipt_path = self.save_receipt_to_file(sale_id, sale_date, payment_method, 
-                                             amount_paid, change)
-            
-            print_status = self.print_receipt_to_hardware(sale_id, sale_date, payment_method, amount_paid, change)
-            
-            # Success message
-            success_msg = f"Sale completed successfully!\n\n"
-            success_msg += f"Sale ID: {sale_id}\n"
-            success_msg += f"Total: KES {self.cart_total:.2f}\n"
-            success_msg += f"Change: KES {change:.2f}\n"
-            
-            if print_status:
-                success_msg += "\n🖨️  Receipt Printed Successfully"
-            else:
-                success_msg += "\n⚠️ Printer Error - Check Connection"
-
-            messagebox.showinfo("Success", success_msg)
-            
-            # Clear cart and refresh inventory
-            self.clear_cart()
-            self.refresh_inventory()
-            
-        except ValueError:
-            messagebox.showerror("Invalid Amount", "Please enter a valid payment amount")
-        except Exception as e:
-            self.conn.rollback()
-            messagebox.showerror("Error", f"Sale failed: {str(e)}")
-    
-    # =======================================================
-    # CORRECTED FIREBASE SYNC FUNCTIONS (Indentation Fixed)
-    # =======================================================
-
-    def sync_sale_in_background(self, data):
-        """
-        Sync a single sale to Firebase using the REST API in a background thread.
-        This replaces the old sync_to_firebase logic.
-        """
-        if not self.firebase_connected:
-            print("⚠️ Firebase not connected - skipping sync")
-            return
-
-        try:
-            # 1. Sync Sale Record
-            sale_id = data['sale_id']
-            # Use .json endpoint for Firebase REST API
-            url = f"{self.firebase_config['databaseURL']}/sales/{sale_id}.json"
-            
-            # Add authentication parameter
-            params = {'auth': self.firebase_config['apiKey']}
-            
-            # Send data
-            response = requests.put(url, json=data, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                print(f"✅ Sale {sale_id} synced to Firebase")
-                # 2. Update Summary
-                self.update_sales_summary(data)
-            else:
-                print(f"❌ Firebase sale sync failed: {response.status_code}. Response: {response.text}")
-                    
-        except requests.exceptions.Timeout:
-            print("❌ Firebase sync timeout - check internet connection")
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Firebase sync error: {e}")
-        except Exception as e:
-            print(f"❌ Unexpected sync error: {e}")
-
-    def update_sales_summary(self, sale_data):
-        """Update daily sales summary with better error handling."""
-        try:
-            today = datetime.now().strftime('%Y-%m-%d')
-            url = f"{self.firebase_config['databaseURL']}/daily_sales/{today}.json"
-            params = {'auth': self.firebase_config['apiKey']}
-            
-            # Get current summary
-            response = requests.get(url, params=params, timeout=10)
-            # Handle empty response (new day)
-            current = response.json() if response.status_code == 200 and response.json() else {'total_sales': 0, 'transaction_count': 0}
-            
-            # Update summary
-            updated = {
-                'total_sales': current.get('total_sales', 0) + sale_data['total_amount'],
-                'transaction_count': current.get('transaction_count', 0) + 1,
-                'last_updated': datetime.now().isoformat()
-            }
-            
-            # Save updated summary
-            response = requests.put(url, json=updated, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                print(f"✅ Daily summary updated: {updated}")
-            else:
-                print(f"❌ Summary update failed: {response.text}")
-                
-        except Exception as e:
-            print(f"❌ Summary update error: {e}")
-            
-    # =======================================================
-    # REST OF CLASS METHODS
-    # =======================================================
-
-    def print_receipt_to_hardware(self, sale_id, sale_date, payment_method, amount_paid, change):
-        """Send receipt data directly to the Windows Printer"""
-        try:
-            # ESC/POS Commands
-            ESC = b'\x1b'
-            GS = b'\x1d'
-            
-            # Initialize
-            raw_data = ESC + b'@' 
-            
-            # Align Center
-            raw_data += ESC + b'a' + b'\x01'
-            
-            # Title (Bold + Double Height)
-            raw_data += ESC + b'!' + b'\x10' + "HERIWADI BOOKSHOP\n".encode('utf-8')
-            raw_data += ESC + b'!' + b'\x00' # Reset font
-            
-            # Header info
-            header = (
-                "OLEKASI Along Maasai Lodge\n"
-                "Rimpa Road\n"
-                "Tel: 0723322449\n"
-                "--------------------------------\n"
-            )
-            raw_data += header.encode('utf-8')
-            
-            # Align Left for items
-            raw_data += ESC + b'a' + b'\x00'
-            
-            # Transaction Details
-            details = (
-                f"Receipt #: {sale_id}\n"
-                f"Date: {sale_date}\n"
-                "--------------------------------\n"
-            )
-            raw_data += details.encode('utf-8')
-            
-            # Items
-            for item in self.cart:
-                # Truncate title if too long to fit on one line
-                title = item['title'][:20] 
-                line = f"{title}\n"
-                line += f"{item['quantity']} x {item['price']:.0f}         {item['price']*item['quantity']:.0f}\n"
-                raw_data += line.encode('utf-8')
-            
-            raw_data += b'--------------------------------\n'
-            
-            # Totals (Align Right)
-            raw_data += ESC + b'a' + b'\x02'
-            totals = (
-                f"TOTAL: KES {self.cart_total:.2f}\n"
-                f"PAID:  KES {amount_paid:.2f}\n"
-                f"CHANGE: KES {change:.2f}\n"
-            )
-            raw_data += totals.encode('utf-8')
-            
-            # Footer (Align Center)
-            raw_data += ESC + b'a' + b'\x01'
-            footer = (
-                "--------------------------------\n"
-                "Thank you for your business!\n"
-            )
-            raw_data += footer.encode('utf-8')
-            
-            # Feed paper (4 lines)
-            raw_data += b'\n\n\n\n'
-            
-            # CUT PAPER COMMAND (GS V m)
-            raw_data += GS + b'V' + b'\x42' + b'\x00'
-
-            # Send to printer using win32print
-            hPrinter = win32print.OpenPrinter(PRINTER_NAME)
-            try:
-                hJob = win32print.StartDocPrinter(hPrinter, 1, ("POS Receipt", None, "RAW"))
-                try:
-                    win32print.StartPagePrinter(hPrinter)
-                    win32print.WritePrinter(hPrinter, raw_data)
-                    win32print.EndPagePrinter(hPrinter)
-                finally:
-                    win32print.EndDocPrinter(hPrinter)
-            finally:
-                win32print.ClosePrinter(hPrinter)
-                
-            return True
-
-        except Exception as e:
-            print(f"Printing failed: {e}")
-            return False
-
-    def save_receipt_to_file(self, sale_id, sale_date, payment_method, amount_paid, change):
-        """Save receipt to file (Backup)"""
-        if not os.path.exists('receipts'):
-            os.makedirs('receipts')
-        
-        filename = f"receipts/receipt_{sale_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        
-        with open(filename, 'w') as f:
-            f.write("="*50 + "\n")
-            f.write("        HERIWADI BOOKSHOP\n")
-            f.write("OLEKASI Along Maasai Lodge - Rimpa Road\n")
-            f.write("          Tel: 0723322449\n")
-            f.write("="*50 + "\n\n")
-            f.write(f"Receipt #: {sale_id}\n")
-            f.write(f"Date: {sale_date}\n")
-            f.write(f"Payment: {payment_method}\n")
-            f.write("-"*50 + "\n\n")
-            
-            for item in self.cart:
-                f.write(f"{item['title']}\n")
-                f.write(f"  {item['quantity']} x KES {item['price']:.2f} = KES {item['price']*item['quantity']:.2f}\n\n")
-            
-            f.write("-"*50 + "\n")
-            f.write(f"TOTAL:         KES {self.cart_total:.2f}\n")
-            f.write(f"PAID:          KES {amount_paid:.2f}\n")
-            f.write(f"CHANGE:        KES {change:.2f}\n")
-            f.write("="*50 + "\n")
-            f.write("      Thank you for your business!\n")
-            f.write("="*50 + "\n")
-        
-        return filename
-
-    def clear_cart(self):
-        """Clear shopping cart"""
-        self.cart = []
-        self.update_cart_display()
-        self.amount_paid_entry.delete(0, 'end')
-
-    def add_book(self):
-        """Add new book to inventory"""
-        try:
-            isbn = self.inventory_entries['isbn'].get().strip()
-            title = self.inventory_entries['title'].get().strip()
-            author = self.inventory_entries['author'].get().strip()
-            category = self.inventory_entries['category'].get().strip()
-            price = float(self.inventory_entries['price'].get().strip())
-            stock = int(self.inventory_entries['stock'].get().strip())
-            
-            if not isbn or not title:
-                messagebox.showwarning("Input Error", "ISBN and Title required")
-                return
-            
-            self.cursor.execute('''
-                INSERT INTO books (isbn, title, author, category, price, stock, date_added)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (isbn, title, author, category, price, stock, 
-                  datetime.now().strftime('%Y-%m-%d')))
-            
-            self.conn.commit()
-            messagebox.showinfo("Success", "Book added successfully!")
-            self.refresh_inventory()
-            self.clear_inventory_form()
-            
-        except ValueError:
-            messagebox.showerror("Input Error", "Invalid price or stock value")
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Error", "ISBN already exists")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to add book: {str(e)}")
-
-    def clear_inventory_form(self):
-        """Clear inventory form"""
-        for entry in self.inventory_entries.values():
+    def reset_form_for_new(self):
+        if self.current_role == "Attendant": return
+        for key, entry in self.inventory_entries.items():
+            entry.config(state='normal')
             entry.delete(0, 'end')
+            if key == 'product_type': entry.set('Book')
+        self.inventory_entries['sku'].config(state='normal', background="#ffffff")
+        self.inventory_entries['sku'].focus()
+
+    def on_inventory_select(self, event):
+        selection = self.inventory_tree.selection()
+        if not selection: return
+        vals = self.inventory_tree.item(selection[0])['values']
+        if self.current_role == "Attendant": return
+            
+        for entry in self.inventory_entries.values():
+            entry.config(state='normal')
+            entry.delete(0, 'end')
+            
+        self.inventory_entries['sku'].insert(0, vals[0])
+        self.inventory_entries['title'].insert(0, vals[1])
+        self.inventory_entries['product_type'].set(vals[2])
+        self.inventory_entries['category'].insert(0, vals[3])
+        self.inventory_entries['price'].insert(0, vals[4])
+        self.inventory_entries['cost_price'].insert(0, vals[5])
+        self.inventory_entries['stock'].insert(0, vals[6])
+        
+        self.cursor.execute("SELECT author_supplier FROM products WHERE sku=?", (vals[0],))
+        res = self.cursor.fetchone()
+        if res:
+             self.inventory_entries['author_supplier'].insert(0, res[0])
+
+        self.inventory_entries['sku'].config(state='readonly', background="#cccccc")
+
+    def add_product(self):
+        try:
+            data = {k: v.get().strip() for k, v in self.inventory_entries.items() if k in self.inventory_entries} # Filter if cost price is excluded
+            if not data['sku'] or not data['title']:
+                messagebox.showwarning("Missing Data", "SKU and Title are required.")
+                return
+            
+            # Ensure cost_price defaults to 0.0 if not present (Attendant role)
+            cost_price = float(data.get('cost_price') or 0.0) 
+            
+            self.cursor.execute('''
+                INSERT INTO products (sku, title, author_supplier, category, product_type, price, cost_price, stock, date_added)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (data['sku'], data['title'], data['author_supplier'], data['category'], 
+                  data['product_type'], float(data['price']), cost_price, 
+                  int(data['stock']), datetime.now().strftime('%Y-%m-%d')))
+            self.conn.commit()
+            messagebox.showinfo("Success", "Product Added!")
+            self.refresh_inventory()
+            self.reset_form_for_new()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error", "SKU already exists.")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def update_product(self):
+        sku = self.inventory_entries['sku'].get()
+        if self.inventory_entries['sku']['state'] == 'normal':
+             messagebox.showwarning("Warning", "New Item detected. Use 'ADD ITEM' or select a product to update.")
+             return
+        try:
+            data = {k: v.get().strip() for k, v in self.inventory_entries.items() if k in self.inventory_entries}
+            
+            # Ensure cost_price is retrieved correctly, or defaults to 0.0 if excluded
+            cost_price_val = float(data.get('cost_price') or 0.0)
+            
+            self.cursor.execute('''
+                UPDATE products SET title=?, author_supplier=?, category=?, product_type=?, price=?, cost_price=?, stock=?
+                WHERE sku=?
+            ''', (data['title'], data['author_supplier'], data['category'], data['product_type'], 
+                  float(data['price']), cost_price_val, int(data['stock']), sku))
+            self.conn.commit()
+            messagebox.showinfo("Success", "Product Updated!")
+            self.refresh_inventory()
+            self.reset_form_for_new()
+        except Exception as e:
+             messagebox.showerror("Error", str(e))
+
+    def delete_product(self):
+        sku = self.inventory_entries['sku'].get()
+        if not sku: return
+        if messagebox.askyesno("Confirm", f"Delete item {sku}?"):
+            self.cursor.execute("DELETE FROM products WHERE sku=?", (sku,))
+            self.conn.commit()
+            self.refresh_inventory()
+            self.reset_form_for_new()
 
     def refresh_inventory(self):
-        """Refresh inventory display"""
-        for item in self.inventory_tree.get_children():
-            self.inventory_tree.delete(item)
-        
-        self.cursor.execute('SELECT isbn, title, author, category, price, stock FROM books')
-        
+        for i in self.inventory_tree.get_children():
+            self.inventory_tree.delete(i)
+        self.cursor.execute('SELECT sku, title, product_type, category, price, cost_price, stock FROM products')
         for row in self.cursor.fetchall():
             self.inventory_tree.insert('', 'end', values=row)
 
+    def search_product(self):
+        q = self.search_entry.get().strip()
+        for i in self.search_tree.get_children(): self.search_tree.delete(i)
+        self.cursor.execute("SELECT sku, title, product_type, price, stock, cost_price FROM products WHERE sku LIKE ? OR title LIKE ?", 
+                            (f'%{q}%', f'%{q}%'))
+        for row in self.cursor.fetchall():
+            self.search_tree.insert('', 'end', values=row[:5], tags=(row[5],))
+
+    def add_to_cart(self):
+        sel = self.search_tree.selection()
+        if not sel: return
+        val = self.search_tree.item(sel[0])['values']
+        cost = self.search_tree.item(sel[0])['tags'][0]
+        qty = simpledialog.askinteger("Qty", "Enter Quantity:", parent=self.root, minvalue=1, maxvalue=val[4])
+        if qty:
+            self.cart.append({
+                'sku': val[0], 'title': val[1], 'type': val[2], 
+                'price': float(val[3]), 'cost': float(cost), 'qty': qty
+            })
+            self.update_cart_ui()
+
+    def update_cart_ui(self):
+        self.cart_text.delete('1.0', 'end')
+        self.cart_total = 0.0
+        for item in self.cart:
+            sub = item['price'] * item['qty']
+            self.cart_total += sub
+            self.cart_text.insert('end', f"{item['title']} x{item['qty']} = {sub:.2f}\n")
+        self.total_label.config(text=f"KES {self.cart_total:,.2f}")
+
+    def calculate_change(self, e):
+        try:
+            paid = float(self.amount_paid_entry.get())
+            self.change_label.config(text=f"Change: KES {paid - self.cart_total:,.2f}")
+        except: pass
+
+    def complete_sale(self):
+        if not self.cart: return
+        profit = sum([(i['price'] - i['cost']) * i['qty'] for i in self.cart])
+        try:
+            paid = float(self.amount_paid_entry.get())
+            if paid < self.cart_total:
+                messagebox.showerror("Error", "Insufficient Funds")
+                return
+            items_json = json.dumps(self.cart)
+            date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.cursor.execute("INSERT INTO sales (sale_date, total_amount, total_profit, payment_method, items_json) VALUES (?,?,?,?,?)",
+                                (date_str, self.cart_total, profit, self.payment_var.get(), items_json))
+            for i in self.cart:
+                self.cursor.execute("UPDATE products SET stock = stock - ? WHERE sku=?", (i['qty'], i['sku']))
+            self.conn.commit()
+            messagebox.showinfo("Success", f"Sale Complete!\nChange: {paid - self.cart_total}")
+            self.cart = []
+            self.update_cart_ui()
+            self.amount_paid_entry.delete(0, 'end')
+            self.refresh_inventory()
+        except ValueError: messagebox.showerror("Error", "Invalid Amount Paid")
+
     def generate_report(self):
-        """Generate sales report"""
         self.reports_text.delete('1.0', 'end')
         
-        # Get today's sales
+        # Control visibility of sensitive data based on role
+        show_profit = True if self.current_role == "Director" else False 
+        
         today = datetime.now().strftime('%Y-%m-%d')
-        self.cursor.execute('''
-            SELECT COUNT(*), SUM(total_amount)
-            FROM sales
-            WHERE DATE(sale_date) = ?
-        ''', (today,))
         
-        today_count, today_total = self.cursor.fetchone()
-        today_total = today_total or 0
+        self.cursor.execute("SELECT count(*), sum(total_amount), sum(total_profit) FROM sales WHERE date(sale_date)=?", (today,))
+        res = self.cursor.fetchone()
         
-        # Get all-time sales
-        self.cursor.execute('SELECT COUNT(*), SUM(total_amount) FROM sales')
-        total_count, total_sales = self.cursor.fetchone()
-        total_sales = total_sales or 0
+        txt = f"REPORT ({today})\nTransactions: {res[0] or 0}\nRevenue: KES {res[1] or 0:,.2f}\n"
         
-        report = f"""
-        ====================================
-              HERIWADI BOOKSHOP
-              SALES REPORT
-        ====================================
+        if show_profit: 
+            txt += f"Profit: KES {res[2] or 0:,.2f}\n"
+        else: 
+            txt += "Profit: [HIDDEN]\n" 
+            
+        self.reports_text.insert('end', txt)
         
-        TODAY'S SALES ({today}):
-        Transactions: {today_count or 0}
-        Total: KES {today_total:.2f}
+        for i in self.sales_tree.get_children(): self.sales_tree.delete(i)
+        self.cursor.execute("SELECT id, total_amount, sale_date FROM sales ORDER BY id DESC LIMIT 20")
+        for row in self.cursor.fetchall():
+            self.sales_tree.insert('', 'end', values=row)
+
+    def export_sales_to_csv(self):
+        filename = f"sales_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        self.cursor.execute('SELECT * FROM sales')
+        sales_data = self.cursor.fetchall()
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['ID', 'Date', 'Total', 'Profit', 'Method', 'Items'])
+                writer.writerows(sales_data)
+            messagebox.showinfo("Export Successful", f"Saved to {filename}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
         
-        ALL-TIME SALES:
-        Total Transactions: {total_count or 0}
-        Total Revenue: KES {total_sales:.2f}
-        
-        ====================================
-        Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        ====================================
-        """
-        
-        self.reports_text.insert('1.0', report)
+    def delete_sale_prompt(self):
+        selection = self.sales_tree.selection()
+        if not selection: return
+        sale_id = self.sales_tree.item(selection[0])['values'][0]
+        if messagebox.askyesno("Confirm", f"Delete Sale {sale_id}?"):
+            try:
+                self.cursor.execute('SELECT items_json FROM sales WHERE id = ?', (sale_id,))
+                items = json.loads(self.cursor.fetchone()[0])
+                for item in items:
+                    self.cursor.execute('UPDATE products SET stock = stock + ? WHERE sku = ?', (item['qty'], item['sku']))
+                self.cursor.execute('DELETE FROM sales WHERE id = ?', (sale_id,))
+                self.conn.commit()
+                self.generate_report()
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+    def clear_cart(self):
+        self.cart = []
+        self.update_cart_ui()
+        self.amount_paid_entry.delete(0, 'end')
+        self.change_label.config(text="Change: KES 0.00")
+        messagebox.showinfo("Cart Cleared", "The shopping cart has been emptied.")
 
     def __del__(self):
-        """Cleanup"""
-        if hasattr(self, 'conn'):
-            self.conn.close()
+        if hasattr(self, 'conn'): self.conn.close()
 
-# Main application
 if __name__ == "__main__":
+    # 1. Initialize Database Tables FIRST
+    initialize_database()
+
+    def start_app(user, role):
+        app = BookshopPOS(root, user, role)
+
+    # 2. Create the main window
+    root = tk.Tk()
+    
+    # Setup theme
+    style = ttk.Style()
     try:
-        root = tk.Tk()
-        app = BookshopPOS(root)
-        root.mainloop()
-    except Exception as e:
-        print(f"Application error: {e}")
-        import traceback
-        traceback.print_exc()
-        input("Press Enter to close...")
+        root.tk.call("source", "azure.tcl")
+        root.tk.call("set_theme", "dark")
+    except:
+        style.theme_use('clam')
+        root.configure(bg="#2b2b2b")
+
+    # 3. Show Login Frame
+    login = LoginWindow(root, start_app)
+    
+    # 4. Start loop
+    root.mainloop()
