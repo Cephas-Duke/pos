@@ -3,113 +3,244 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HERIWADI BOOKSHOP - Live Dashboard</title>
+    <title>Heriwadi Admin | POS Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        /* Custom scrollbar for table area */
+        .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scroll::-webkit-scrollbar-track { background: #f1f1f1; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
 </head>
-<body class="bg-gray-100">
-    <div class="container mx-auto px-4 py-8">
-        <!-- Header -->
-        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h1 class="text-3xl font-bold text-gray-800">HERIWADI BOOKSHOP</h1>
-            <p class="text-gray-600">Live Sales Dashboard</p>
-            <p class="text-sm text-gray-500">OLEKASI Along Maasai Lodge - Rimpa Road | 0723322449</p>
-        </div>
+<body class="bg-slate-100 text-slate-800 font-sans antialiased">
 
-        <!-- Stats Cards -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h3 class="text-lg font-semibold text-gray-700 mb-2">Today's Sales</h3>
-                <p class="text-3xl font-bold text-green-600" id="todaySales">KES 0.00</p>
-            </div>
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h3 class="text-lg font-semibold text-gray-700 mb-2">Total Sales</h3>
-                <p class="text-3xl font-bold text-blue-600" id="totalSales">KES 0.00</p>
-            </div>
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h3 class="text-lg font-semibold text-gray-700 mb-2">Total Transactions</h3>
-                <p class="text-3xl font-bold text-purple-600" id="totalTransactions">0</p>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <!-- Recent Sales -->
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h3 class="text-xl font-semibold text-gray-800 mb-4">Recent Sales</h3>
-                <div id="recentSales" class="space-y-3">
-                    <div class="text-center text-gray-500">Loading sales data...</div>
+    <div class="flex h-screen overflow-hidden">
+        
+        <aside class="w-64 bg-slate-900 text-white flex flex-col hidden md:flex">
+            <div class="p-6 flex items-center gap-3 border-b border-slate-800">
+                <i class="fa-solid fa-book-open text-2xl text-emerald-400"></i>
+                <div>
+                    <h1 class="font-bold text-lg tracking-wide">HERIWADI</h1>
+                    <p class="text-xs text-slate-400">Bookshop POS</p>
                 </div>
             </div>
 
-            <!-- Recent Activity -->
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <h3 class="text-xl font-semibold text-gray-800 mb-4">Recent Activity</h3>
-                <div id="recentActivity" class="space-y-3">
-                    <div class="text-center text-gray-500">Loading activity...</div>
+            <nav class="flex-1 p-4 space-y-2">
+                <a href="#" class="flex items-center gap-3 px-4 py-3 bg-emerald-600 rounded-lg text-white shadow-lg transition">
+                    <i class="fa-solid fa-chart-line"></i> Dashboard
+                </a>
+                <div class="px-4 py-3 text-slate-500 cursor-not-allowed flex items-center gap-3">
+                    <i class="fa-solid fa-box"></i> Inventory <span class="text-xs bg-slate-800 px-2 py-0.5 rounded ml-auto">Soon</span>
                 </div>
+            </nav>
+
+            <div class="p-4 border-t border-slate-800">
+                <button onclick="confirmReset()" class="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-500/50 text-red-400 hover:bg-red-500/10 rounded-lg transition text-sm">
+                    <i class="fa-solid fa-trash-can"></i> Clear Test Data
+                </button>
             </div>
+        </aside>
+
+        <div class="flex-1 flex flex-col h-screen overflow-y-auto custom-scroll relative">
+            
+            <header class="bg-white shadow-sm p-4 md:hidden flex justify-between items-center sticky top-0 z-10">
+                <div class="font-bold text-slate-800">HERIWADI POS</div>
+                <button onclick="alert('Use Desktop for full admin features')" class="text-slate-500"><i class="fa-solid fa-bars"></i></button>
+            </header>
+
+            <main class="p-6 md:p-8 max-w-7xl mx-auto w-full">
+                
+                <div class="flex justify-between items-end mb-8">
+                    <div>
+                        <h2 class="text-2xl font-bold text-slate-800">Dashboard Overview</h2>
+                        <p class="text-slate-500 text-sm mt-1" id="lastUpdated">Updating...</p>
+                    </div>
+                    <button onclick="updateDashboard()" class="bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 px-4 py-2 rounded-lg shadow-sm text-sm transition">
+                        <i class="fa-solid fa-rotate mr-1"></i> Refresh
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex items-center gap-4">
+                        <div class="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-xl">
+                            <i class="fa-solid fa-cash-register"></i>
+                        </div>
+                        <div>
+                            <p class="text-sm text-slate-500 font-medium">Today's Sales</p>
+                            <h3 class="text-2xl font-bold text-slate-800" id="todaySales">...</h3>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex items-center gap-4">
+                        <div class="w-12 h-12 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xl">
+                            <i class="fa-solid fa-sack-dollar"></i>
+                        </div>
+                        <div>
+                            <p class="text-sm text-slate-500 font-medium">Total Revenue</p>
+                            <h3 class="text-2xl font-bold text-slate-800" id="totalSales">...</h3>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex items-center gap-4">
+                        <div class="w-12 h-12 rounded-full bg-purple-100 text-purple-600 flex items-center justify-center text-xl">
+                            <i class="fa-solid fa-receipt"></i>
+                        </div>
+                        <div>
+                            <p class="text-sm text-slate-500 font-medium">Transactions</p>
+                            <h3 class="text-2xl font-bold text-slate-800" id="totalTransactions">...</h3>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                    <div class="lg:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+                        <h3 class="font-bold text-slate-700 mb-4">Sales Trend (Last 7 Days)</h3>
+                        <div class="h-64">
+                            <canvas id="salesChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+                        <h3 class="font-bold text-slate-700 mb-4">Payment Methods</h3>
+                        <div class="h-48 flex justify-center">
+                            <canvas id="paymentChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+                    <div class="px-6 py-4 border-b border-slate-100">
+                        <h3 class="font-bold text-slate-700">Recent Transactions</h3>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm text-left">
+                            <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                                <tr>
+                                    <th class="px-6 py-3">ID</th>
+                                    <th class="px-6 py-3">Amount</th>
+                                    <th class="px-6 py-3">Method</th>
+                                    <th class="px-6 py-3">Items</th>
+                                    <th class="px-6 py-3">Time</th>
+                                </tr>
+                            </thead>
+                            <tbody id="salesTableBody" class="divide-y divide-slate-100">
+                                <tr><td colspan="5" class="px-6 py-4 text-center">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </main>
         </div>
     </div>
 
     <script>
-        // Fetch and update data
+        // --- 1. SETUP CHARTS ---
+        let salesChartInstance = null;
+        let paymentChartInstance = null;
+
+        function initCharts() {
+            // Line Chart
+            const ctx1 = document.getElementById('salesChart').getContext('2d');
+            salesChartInstance = new Chart(ctx1, {
+                type: 'line',
+                data: { labels: [], datasets: [{ label: 'Sales (KES)', data: [], borderColor: '#10b981', backgroundColor: '#d1fae5', tension: 0.4, fill: true }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { borderDash: [5, 5] } }, x: { grid: { display: false } } } }
+            });
+
+            // Doughnut Chart
+            const ctx2 = document.getElementById('paymentChart').getContext('2d');
+            paymentChartInstance = new Chart(ctx2, {
+                type: 'doughnut',
+                data: { labels: [], datasets: [{ data: [], backgroundColor: ['#3b82f6', '#8b5cf6', '#f59e0b'] }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+            });
+        }
+
+        // --- 2. FETCH & UPDATE DATA ---
         async function updateDashboard() {
+            const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            document.getElementById('lastUpdated').textContent = `Last updated: ${timeStr}`;
+
             try {
-                // Fetch stats
-                const statsResponse = await fetch('/api/stats');
-                const stats = await statsResponse.json();
-                
-                document.getElementById('todaySales').textContent = `KES ${stats.today_sales.toFixed(2)}`;
-                document.getElementById('totalSales').textContent = `KES ${stats.total_sales.toFixed(2)}`;
+                // A. Stats
+                const statsRes = await fetch('/api/stats');
+                const stats = await statsRes.json();
+                document.getElementById('todaySales').textContent = `KES ${stats.today_sales.toLocaleString()}`;
+                document.getElementById('totalSales').textContent = `KES ${stats.total_sales.toLocaleString()}`;
                 document.getElementById('totalTransactions').textContent = stats.total_transactions;
 
-                // Fetch recent sales
-                const salesResponse = await fetch('/api/sales');
-                const sales = await salesResponse.json();
+                // B. Charts
+                const chartRes = await fetch('/api/charts');
+                const chartData = await chartRes.json();
                 
-                const salesContainer = document.getElementById('recentSales');
-                if (sales.length > 0) {
-                    salesContainer.innerHTML = sales.map(sale => `
-                        <div class="border-l-4 border-green-500 bg-gray-50 p-3 rounded">
-                            <div class="flex justify-between items-center">
-                                <span class="font-semibold">Sale #${sale.id}</span>
-                                <span class="text-green-600 font-bold">KES ${sale.amount.toFixed(2)}</span>
-                            </div>
-                            <div class="text-sm text-gray-600">
-                                ${sale.payment_method} • ${new Date(sale.timestamp).toLocaleString()}
-                            </div>
-                        </div>
-                    `).join('');
-                } else {
-                    salesContainer.innerHTML = '<div class="text-center text-gray-500">No sales data available</div>';
+                if (chartData.weekly_sales) {
+                    salesChartInstance.data.labels = chartData.weekly_sales.labels;
+                    salesChartInstance.data.datasets[0].data = chartData.weekly_sales.data;
+                    salesChartInstance.update();
+                }
+                if (chartData.payment_methods) {
+                    paymentChartInstance.data.labels = chartData.payment_methods.labels;
+                    paymentChartInstance.data.datasets[0].data = chartData.payment_methods.data;
+                    paymentChartInstance.update();
                 }
 
-                // Fetch recent activity
-                const activityResponse = await fetch('/api/recent-activity');
-                const activities = await activityResponse.json();
+                // C. Recent Sales Table
+                const tableRes = await fetch('/api/sales');
+                const sales = await tableRes.json();
+                const tbody = document.getElementById('salesTableBody');
                 
-                const activityContainer = document.getElementById('recentActivity');
-                if (activities.length > 0) {
-                    activityContainer.innerHTML = activities.map(activity => `
-                        <div class="border-l-4 border-blue-500 bg-gray-50 p-3 rounded">
-                            <div class="font-semibold">${activity.message}</div>
-                            <div class="text-sm text-gray-600">
-                                ${new Date(activity.timestamp).toLocaleString()}
-                            </div>
-                        </div>
-                    `).join('');
+                if(sales.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="5" class="px-6 py-8 text-center text-slate-400">No sales data found</td></tr>`;
                 } else {
-                    activityContainer.innerHTML = '<div class="text-center text-gray-500">No recent activity</div>';
+                    tbody.innerHTML = sales.map(sale => `
+                        <tr class="hover:bg-slate-50 transition">
+                            <td class="px-6 py-4 font-medium text-slate-700">#${sale.id}</td>
+                            <td class="px-6 py-4 font-bold text-emerald-600">KES ${sale.amount.toLocaleString()}</td>
+                            <td class="px-6 py-4">
+                                <span class="px-2 py-1 rounded text-xs font-semibold ${sale.method === 'M-Pesa' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}">
+                                    ${sale.method}
+                                </span>
+                            </td>
+                            <td class="px-6 py-4 text-slate-500">${sale.items}</td>
+                            <td class="px-6 py-4 text-slate-400 text-xs">${new Date(sale.timestamp).toLocaleString()}</td>
+                        </tr>
+                    `).join('');
                 }
 
-            } catch (error) {
-                console.error('Error updating dashboard:', error);
+            } catch (err) {
+                console.error("Dashboard Update Error:", err);
             }
         }
 
-        // Update every 10 seconds
-        setInterval(updateDashboard, 10000);
-        updateDashboard(); // Initial load
+        // --- 3. RESET DATA FUNCTION ---
+        async function confirmReset() {
+            if(!confirm("⚠️ DANGER ZONE \n\nAre you sure you want to DELETE ALL sales records? \nThis cannot be undone.")) return;
+            
+            const password = prompt("To confirm, type 'DELETE' below:");
+            if(password !== "DELETE") { alert("Incorrect confirmation."); return; }
+
+            try {
+                const res = await fetch('/api/reset-data', { method: 'POST' });
+                const result = await res.json();
+                alert(result.message);
+                updateDashboard(); // Refresh UI to show empty state
+            } catch (e) {
+                alert("Error clearing data: " + e);
+            }
+        }
+
+        // --- INITIALIZE ---
+        window.addEventListener('load', () => {
+            initCharts();
+            updateDashboard();
+            setInterval(updateDashboard, 10000); // Auto-refresh every 10s
+        });
+
     </script>
 </body>
 </html>
