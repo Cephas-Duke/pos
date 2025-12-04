@@ -1,10 +1,8 @@
-# web_dashboard.py (Final Fix for Recent Sales and Activity)
-
 from flask import Flask, render_template, jsonify, request
 import firebase_admin
 from firebase_admin import credentials, db
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import sys
 
@@ -12,221 +10,163 @@ app = Flask(__name__)
 
 # --- CONFIGURATION ---
 FIREBASE_DATABASE_URL = 'https://heriwadi-bookshop-default-rtdb.firebaseio.com/'
-
-# Global variable to track Firebase initialization status
 firebase_initialized = False
 
-# Initialize Firebase (Robust initialization)
+# --- INITIALIZATION ---
 try:
     cred_json_str = os.environ.get('FIREBASE_CREDENTIALS_JSON')
-    
     if cred_json_str:
-        # Load the credentials safely
         try:
             cred_info = json.loads(cred_json_str)
             cred = credentials.Certificate(cred_info)
-            
-            # Prevent re-initialization error if running locally
             if not firebase_admin._apps:
-                firebase_admin.initialize_app(cred, {
-                    'databaseURL': FIREBASE_DATABASE_URL
-                })
-            print("✅ Firebase initialized successfully from Environment Variable.")
+                firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_DATABASE_URL})
+            print("✅ Firebase initialized successfully.")
             firebase_initialized = True
         except Exception as json_e:
-            print(f"❌ Error loading or initializing Firebase credentials: {json_e}")
-            
+            print(f"❌ Error loading credentials: {json_e}")
     else:
-        print("⚠️ FIREBASE_CREDENTIALS_JSON environment variable not found.")
-        print("🔴 Dashboard will operate with zero data until configured.")
-        
+        print("⚠️ FIREBASE_CREDENTIALS_JSON not found. Running in offline mode.")
 except Exception as e:
-    print(f"❌ Critical Firebase initialization failed (Outside credential block): {e}")
+    print(f"❌ Critical Initialization Error: {e}")
 
-# --- HELPER FUNCTION (Fix for '/api/stats' and '/api/debug') ---
+# --- HELPER FUNCTIONS ---
 def get_safe_sales_data():
-    """Fetches ALL sales and ensures it is a dictionary (fixes previous 'list' object error)."""
-    if not firebase_initialized:
-        return {}
-        
+    """Fetches ALL sales and ensures it is a dictionary."""
+    if not firebase_initialized: return {}
     try:
         ref = db.reference('/sales')
-        sales_data = ref.get() 
-        
-        if sales_data is None:
-            return {}
-        
-        # This handles the previous error where the full sales path was read as a list
+        sales_data = ref.get()
+        if sales_data is None: return {}
         if isinstance(sales_data, list):
             return {str(i): item for i, item in enumerate(sales_data) if item is not None}
-            
         return sales_data
-        
     except Exception as e:
         print(f"❌ Error in get_safe_sales_data: {e}")
         return {}
 
-# --- FLASK ROUTES ---
+# --- ROUTES ---
 
 @app.route('/')
 def dashboard():
-    """Renders the main dashboard HTML template."""
     return render_template('index.html')
-
-@app.route('/api/sales')
-def get_sales():
-    """Fetches and formats recent sales for the activity feed. (CRITICAL FIX APPLIED)"""
-    try:
-        if not firebase_initialized: return jsonify([])
-        
-        ref = db.reference('/sales')
-        sales_data = ref.order_by_child('timestamp').limit_to_last(50).get()
-        
-        if sales_data:
-            sales = []
-            
-            # CRITICAL FIX: The result of limit_to_last() is always a Python list
-            if isinstance(sales_data, list):
-                sales_list = sales_data
-            else:
-                # Fallback for unexpected dictionary structure
-                sales_list = sales_data.values() 
-
-            for value in sales_list:
-                if isinstance(value, dict):
-                    sales.append({
-                        'id': value.get('sale_id', 'N/A'),
-                        'amount': value.get('total_amount', 0),
-                        'payment_method': value.get('payment_method', ''),
-                        'timestamp': value.get('timestamp', '').replace('Z', '+00:00'),
-                        'items_count': len(value.get('items', []))
-                    })
-            # Reverse sales to show newest first, as limit_to_last returns oldest first
-            return jsonify(sales[::-1])
-            
-    except Exception as e:
-        print(f"❌ Error fetching sales: {e}")
-    
-    return jsonify([])
 
 @app.route('/api/stats')
 def get_stats():
-    """Calculates and returns total sales, transactions, and today's sales."""
     try:
-        sales_data = get_safe_sales_data() # Uses the fixed helper
-        
-        if not sales_data:
-            return jsonify({
-                'total_sales': 0,
-                'total_transactions': 0,
-                'today_sales': 0
-            })
-        
+        sales_data = get_safe_sales_data()
         total_sales = 0.0
         total_transactions = 0
         today_sales = 0.0
-        
         today = datetime.now().strftime('%Y-%m-%d')
         
-        for sale_id, sale in sales_data.items():
-            total_amount = sale.get('total_amount', 0)
-            timestamp_str = sale.get('timestamp')
-
-            total_sales += total_amount
+        for _, sale in sales_data.items():
+            amt = float(sale.get('total_amount', 0))
+            total_sales += amt
             total_transactions += 1
             
-            if timestamp_str:
+            ts = sale.get('timestamp', '')
+            if ts:
                 try:
-                    sale_date_str = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).strftime('%Y-%m-%d')
-                    if sale_date_str == today:
-                        today_sales += total_amount
-                except ValueError:
-                    pass
-        
-        result = {
+                    # Parse timestamp to check if it's today
+                    s_date = datetime.fromisoformat(ts.replace('Z', '+00:00')).strftime('%Y-%m-%d')
+                    if s_date == today:
+                        today_sales += amt
+                except: pass
+
+        return jsonify({
             'total_sales': round(total_sales, 2),
             'total_transactions': total_transactions,
             'today_sales': round(today_sales, 2)
-        }
-        
-        return jsonify(result)
-        
+        })
     except Exception as e:
-        print(f"❌ Error fetching stats: {e}")
-    
-    return jsonify({
-        'total_sales': 0,
-        'total_transactions': 0,
-        'today_sales': 0
-    })
+        print(f"Error stats: {e}")
+        return jsonify({'total_sales': 0, 'total_transactions': 0, 'today_sales': 0})
 
-@app.route('/api/recent-activity')
-def get_recent_activity():
-    """Fetches and formats the 10 most recent activities. (CRITICAL FIX APPLIED)"""
+@app.route('/api/sales')
+def get_recent_sales():
+    """Fetches last 20 sales for the table."""
     try:
         if not firebase_initialized: return jsonify([])
-        
         ref = db.reference('/sales')
-        sales_data = ref.order_by_child('timestamp').limit_to_last(10).get()
+        # Limit to last 20 to keep dashboard fast
+        data = ref.order_by_child('timestamp').limit_to_last(20).get()
         
-        if sales_data:
-            activity = []
-            
-            # CRITICAL FIX: The result of limit_to_last() is always a Python list
-            if isinstance(sales_data, list):
-                sales_list = sales_data
-            else:
-                sales_list = sales_data.values() 
-                
-            for value in sales_list:
-                if isinstance(value, dict):
-                    activity.append({
-                        'type': 'sale',
-                        'message': f"Sale #{value.get('sale_id', 'N/A')} - KES {value.get('total_amount', 0):.2f}",
-                        'timestamp': value.get('timestamp', '')
+        sales = []
+        if data:
+            source = data if isinstance(data, list) else data.values()
+            for item in source:
+                if isinstance(item, dict):
+                    sales.append({
+                        'id': item.get('sale_id', 'N/A'),
+                        'amount': item.get('total_amount', 0),
+                        'method': item.get('payment_method', 'Cash'),
+                        'timestamp': item.get('timestamp', ''),
+                        'items': len(item.get('items', []))
                     })
-            # Reverse for most recent first
-            return jsonify(activity[::-1])
-            
+        # Return reversed (newest first)
+        return jsonify(sales[::-1])
     except Exception as e:
-        print(f"❌ Error fetching activity: {e}")
-    
-    return jsonify([])
+        return jsonify([])
 
-@app.route('/api/debug')
-def debug():
-    """Debug endpoint to check Firebase data structure"""
+@app.route('/api/charts')
+def get_chart_data():
+    """Aggregates data for the Dashboard Charts."""
     try:
-        sales_data = get_safe_sales_data() # Uses the fixed helper
+        sales_data = get_safe_sales_data()
         
-        sales_keys = list(sales_data.keys()) if sales_data else []
-        sales_sample = [sales_data[k] for k in sales_keys[:2]] 
+        # 1. Payment Method Stats
+        methods = {}
         
-        summary_ref = db.reference('/daily_sales')
-        summary_data = summary_ref.get()
+        # 2. Weekly Trends (Last 7 days)
+        today = datetime.now().date()
+        last_7_days = [(today - timedelta(days=i)) for i in range(6, -1, -1)] # List of last 7 dates
+        daily_totals = {d.strftime('%Y-%m-%d'): 0.0 for d in last_7_days}
         
+        for _, sale in sales_data.items():
+            # Method Count
+            pm = sale.get('payment_method', 'Unknown')
+            methods[pm] = methods.get(pm, 0) + 1
+            
+            # Daily Sum
+            ts = sale.get('timestamp')
+            if ts:
+                try:
+                    d_str = datetime.fromisoformat(ts.replace('Z', '+00:00')).strftime('%Y-%m-%d')
+                    if d_str in daily_totals:
+                        daily_totals[d_str] += float(sale.get('total_amount', 0))
+                except: pass
+
         return jsonify({
-            'sales_count': len(sales_data) if sales_data else 0,
-            'sales_sample': sales_sample, 
-            'daily_summary': summary_data,
-            'firebase_url': FIREBASE_DATABASE_URL,
-            'env_var_set': bool(os.environ.get('FIREBASE_CREDENTIALS_JSON')),
-            'firebase_initialized': firebase_initialized
+            'payment_methods': {
+                'labels': list(methods.keys()),
+                'data': list(methods.values())
+            },
+            'weekly_sales': {
+                'labels': [d.strftime('%a %d') for d in last_7_days], # e.g. "Mon 04"
+                'data': list(daily_totals.values())
+            }
         })
     except Exception as e:
-        import traceback
-        return jsonify({
-            'error': str(e),
-            'traceback': traceback.format_exc(),
-            'env_var_set': bool(os.environ.get('FIREBASE_CREDENTIALS_JSON')),
-            'firebase_initialized': firebase_initialized
-        })
+        print(e)
+        return jsonify({})
 
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+# --- DANGER ZONE: RESET DATA ---
+@app.route('/api/reset-data', methods=['POST'])
+def reset_data():
+    """Deletes ALL sales data. Used for clearing testing data."""
+    try:
+        if not firebase_initialized:
+            return jsonify({'success': False, 'message': 'Firebase not connected'})
+            
+        # Delete the sales node
+        db.reference('/sales').delete()
+        print("⚠️ SALES DATA CLEARED BY USER REQUEST")
+        
+        return jsonify({'success': True, 'message': 'All sales data wiped successfully.'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port)
