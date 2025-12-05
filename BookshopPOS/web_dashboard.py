@@ -9,6 +9,7 @@ import sys
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
+# Ensure this URL matches the one in your POS code
 FIREBASE_DATABASE_URL = 'https://heriwadi-bookshop-default-rtdb.firebaseio.com/'
 firebase_initialized = False
 
@@ -45,6 +46,18 @@ def get_safe_sales_data():
         print(f"❌ Error in get_safe_sales_data: {e}")
         return {}
 
+def parse_date(date_str):
+    """Robust date parser handling POS format and ISO format."""
+    try:
+        # Try POS format first (YYYY-MM-DD HH:MM:SS)
+        return datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+    except:
+        try:
+            # Try ISO format (YYYY-MM-DDTHH:MM:SS...)
+            return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        except:
+            return None
+
 # --- ROUTES ---
 
 @app.route('/')
@@ -61,18 +74,21 @@ def get_stats():
         today = datetime.now().strftime('%Y-%m-%d')
         
         for _, sale in sales_data.items():
-            amt = float(sale.get('total_amount', 0))
+            # Get amount
+            try:
+                amt = float(sale.get('total_amount', 0))
+            except:
+                amt = 0.0
+
             total_sales += amt
             total_transactions += 1
             
-            ts = sale.get('timestamp', '')
+            # Get date
+            ts = sale.get('timestamp') or sale.get('sale_date')
             if ts:
-                try:
-                    # Parse timestamp to check if it's today
-                    s_date = datetime.fromisoformat(ts.replace('Z', '+00:00')).strftime('%Y-%m-%d')
-                    if s_date == today:
-                        today_sales += amt
-                except: pass
+                dt_obj = parse_date(ts)
+                if dt_obj and dt_obj.strftime('%Y-%m-%d') == today:
+                    today_sales += amt
 
         return jsonify({
             'total_sales': round(total_sales, 2),
@@ -89,7 +105,7 @@ def get_recent_sales():
     try:
         if not firebase_initialized: return jsonify([])
         ref = db.reference('/sales')
-        # Limit to last 20 to keep dashboard fast
+        # Limit to last 20
         data = ref.order_by_child('timestamp').limit_to_last(20).get()
         
         sales = []
@@ -120,7 +136,7 @@ def get_chart_data():
         
         # 2. Weekly Trends (Last 7 days)
         today = datetime.now().date()
-        last_7_days = [(today - timedelta(days=i)) for i in range(6, -1, -1)] # List of last 7 dates
+        last_7_days = [(today - timedelta(days=i)) for i in range(6, -1, -1)] 
         daily_totals = {d.strftime('%Y-%m-%d'): 0.0 for d in last_7_days}
         
         for _, sale in sales_data.items():
@@ -129,13 +145,15 @@ def get_chart_data():
             methods[pm] = methods.get(pm, 0) + 1
             
             # Daily Sum
-            ts = sale.get('timestamp')
+            ts = sale.get('timestamp') or sale.get('sale_date')
             if ts:
-                try:
-                    d_str = datetime.fromisoformat(ts.replace('Z', '+00:00')).strftime('%Y-%m-%d')
+                dt_obj = parse_date(ts)
+                if dt_obj:
+                    d_str = dt_obj.strftime('%Y-%m-%d')
                     if d_str in daily_totals:
-                        daily_totals[d_str] += float(sale.get('total_amount', 0))
-                except: pass
+                        try:
+                            daily_totals[d_str] += float(sale.get('total_amount', 0))
+                        except: pass
 
         return jsonify({
             'payment_methods': {
@@ -143,29 +161,13 @@ def get_chart_data():
                 'data': list(methods.values())
             },
             'weekly_sales': {
-                'labels': [d.strftime('%a %d') for d in last_7_days], # e.g. "Mon 04"
+                'labels': [d.strftime('%a %d') for d in last_7_days], 
                 'data': list(daily_totals.values())
             }
         })
     except Exception as e:
         print(e)
         return jsonify({})
-
-# --- DANGER ZONE: RESET DATA ---
-@app.route('/api/reset-data', methods=['POST'])
-def reset_data():
-    """Deletes ALL sales data. Used for clearing testing data."""
-    try:
-        if not firebase_initialized:
-            return jsonify({'success': False, 'message': 'Firebase not connected'})
-            
-        # Delete the sales node
-        db.reference('/sales').delete()
-        print("⚠️ SALES DATA CLEARED BY USER REQUEST")
-        
-        return jsonify({'success': True, 'message': 'All sales data wiped successfully.'})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
