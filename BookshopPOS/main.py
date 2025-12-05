@@ -6,21 +6,25 @@ import json
 import os
 import hashlib
 import csv
+import threading # For non-blocking Firebase upload
+import requests # For communicating with Firebase REST API
 
 # --- TRY IMPORTING PRINTER LIBRARIES ---
 try:
     import win32print
     import win32ui
+    # Note: If win32print fails, ensure you run 'pip install pywin32'
 except ImportError:
     win32print = None
     print("⚠️ WARNING: 'pywin32' not installed. Printing will not work.")
-    print("👉 Run: pip install pywin32")
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
 # Make sure this matches your Windows Printer name EXACTLY
 PRINTER_NAME = "BTP-R880NP(U) 1" 
+# 👇 REPLACE WITH YOUR ACTUAL FIREBASE DB URL
+FIREBASE_URL = "https://heriwadi-bookshop-default-rtdb.firebaseio.com" 
 # ==========================================
 
 # ==========================================
@@ -320,7 +324,7 @@ class BookshopPOS:
             self.sales_tree.bind('<Double-1>', lambda e: self.delete_sale_prompt())
 
     # =========================================================================
-    # --- LOGIC & PRINTING ---
+    # --- LOGIC & PRINTING & UPLOADING ---
     # =========================================================================
 
     def print_receipt(self, receipt_data):
@@ -328,7 +332,7 @@ class BookshopPOS:
         Sends formatted text to the Windows POS Printer
         """
         if not win32print:
-            messagebox.showwarning("Printing Error", "Required printer libraries not installed.\nReceipt not printed.")
+            messagebox.showwarning("Printing Error", "Required printer libraries not installed ('pywin32').\nReceipt not printed.")
             return
 
         try:
@@ -357,14 +361,11 @@ class BookshopPOS:
             text += "\n\n\n\n" # Feed lines
             
             # 2. Send to Printer
-            # Open the printer
             hPrinter = win32print.OpenPrinter(PRINTER_NAME)
             try:
-                # Start a Job
                 hJob = win32print.StartDocPrinter(hPrinter, 1, ("Receipt", None, "RAW"))
                 try:
                     win32print.StartPagePrinter(hPrinter)
-                    # Send data (Must be bytes)
                     win32print.WritePrinter(hPrinter, text.encode("utf-8"))
                     # Cut Paper Command (Standard ESC/POS: GS V 66 0)
                     win32print.WritePrinter(hPrinter, b'\x1d\x56\x42\x00') 
@@ -377,19 +378,34 @@ class BookshopPOS:
         except Exception as e:
             messagebox.showerror("Printer Error", f"Could not print receipt.\n\nCheck if printer is ON and name is correct.\n\nDetails: {str(e)}")
 
+    def upload_to_firebase(self, data):
+        """Sends data to the web dashboard asynchronously using requests."""
+        try:
+            url = f"{FIREBASE_URL}/sales.json"
+            response = requests.post(url, json=data)
+            if response.status_code == 200:
+                 print("✅ Data successfully uploaded to Firebase.")
+            else:
+                 print(f"❌ Firebase Upload Failed. Status: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Upload Failed (Connection Error): {e}")
+
     def complete_sale(self):
         if not self.cart: return
+        
         profit = sum([(i['price'] - i['cost']) * i['qty'] for i in self.cart])
+        
         try:
             paid = float(self.amount_paid_entry.get())
             if paid < self.cart_total:
                 messagebox.showerror("Error", "Insufficient Funds")
                 return
-                
-            items_json = json.dumps(self.cart)
-            date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
-            # Save to Database
+            # 1. Prepare Data & Date String
+            date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            items_json = json.dumps(self.cart)
+
+            # 2. Save to LOCAL Database (SQLite) and update stock
             self.cursor.execute("INSERT INTO sales (sale_date, total_amount, total_profit, payment_method, items_json) VALUES (?,?,?,?,?)",
                                 (date_str, self.cart_total, profit, self.payment_var.get(), items_json))
             
@@ -397,7 +413,7 @@ class BookshopPOS:
                 self.cursor.execute("UPDATE products SET stock = stock - ? WHERE sku=?", (i['qty'], i['sku']))
             self.conn.commit()
             
-            # --- PRINT RECEIPT ---
+            # 3. Handle Printing
             receipt_data = {
                 'date': date_str,
                 'items': self.cart,
@@ -406,11 +422,21 @@ class BookshopPOS:
                 'change': paid - self.cart_total
             }
             self.print_receipt(receipt_data)
-            # ---------------------
-
-            messagebox.showinfo("Success", f"Sale Complete!\nChange: {paid - self.cart_total}")
             
-            # Clear UI
+            # 4. ☁️ Upload to Firebase (Web Dashboard) in a separate thread
+            sale_data = {
+                "sale_date": date_str,
+                "timestamp": date_str, # Used by the dashboard for sorting/charting
+                "total_amount": self.cart_total,
+                "total_profit": profit,
+                "payment_method": self.payment_var.get(),
+                "items": self.cart,
+                "cashier": self.current_user
+            }
+            threading.Thread(target=self.upload_to_firebase, args=(sale_data,), daemon=True).start()
+
+            # 5. UI Reset & Success
+            messagebox.showinfo("Success", f"Sale Complete!\nChange: {paid - self.cart_total:,.2f}")
             self.cart = []
             self.update_cart_ui()
             self.amount_paid_entry.delete(0, 'end')
@@ -418,7 +444,10 @@ class BookshopPOS:
             
         except ValueError: messagebox.showerror("Error", "Invalid Amount Paid")
         except sqlite3.OperationalError as e:
-             messagebox.showerror("Database Error", f"Database schema mismatch.\nRestart app to fix.\nError: {e}")
+             messagebox.showerror("Database Error", f"Database operation failed.\nError: {e}")
+        except Exception as e:
+             # Catch all general errors that weren't specific to SQL or Value errors
+             messagebox.showerror("System Error", f"An unexpected error occurred during sale completion.\nError: {e}")
 
     # --- Other Standard Methods ---
     def reset_form_for_new(self):
