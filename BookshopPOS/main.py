@@ -21,7 +21,6 @@ except ImportError:
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# Make sure this matches your Windows Printer name EXACTLY
 PRINTER_NAME = "BTP-R880NP(U) 1" 
 # 👇 REPLACE WITH YOUR ACTUAL FIREBASE DB URL
 FIREBASE_URL = "https://heriwadi-bookshop-default-rtdb.firebaseio.com" 
@@ -87,9 +86,9 @@ def initialize_database():
         user_pw = hashlib.sha256("user123".encode()).hexdigest()
         
         cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
-                            ("admin", admin_pw, "Director"))
+                       ("admin", admin_pw, "Director"))
         cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
-                            ("user", user_pw, "Attendant"))
+                       ("user", user_pw, "Attendant"))
         conn.commit()
     
     conn.commit()
@@ -157,7 +156,12 @@ class BookshopPOS:
         
         self.create_ui()
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
+        
+        # Initial Load
         self.refresh_inventory()
+        
+        # Auto-Sync on startup (Threaded to not freeze UI)
+        threading.Thread(target=self.sync_inventory_from_firebase, daemon=True).start()
 
     def on_tab_change(self, event):
         selected_tab = self.notebook.tab(self.notebook.select(), "text")
@@ -261,23 +265,40 @@ class BookshopPOS:
                 entry = ttk.Entry(form_frame)
             entry.grid(row=row_num, column=col_idx+1, sticky='ew', padx=5, pady=5)
             self.inventory_entries[key] = entry
+        
+        # --- ACTION BUTTONS ---
         btn_frame = tk.Frame(form_frame, bg="#2b2b2b")
         btn_frame.grid(row=4, column=0, columnspan=4, pady=15)
-        self.btn_new = tk.Button(btn_frame, text="✨ RESET FORM", command=self.reset_form_for_new, bg="#9E9E9E", fg="white", relief="flat", padx=15)
-        self.btn_add = tk.Button(btn_frame, text="➕ ADD ITEM", command=self.add_product, bg="#4CAF50", fg="white", relief="flat", padx=15)
-        self.btn_update = tk.Button(btn_frame, text="💾 UPDATE", command=self.update_product, bg="#2196F3", fg="white", relief="flat", padx=15)
-        self.btn_delete = tk.Button(btn_frame, text="🗑️ DELETE", command=self.delete_product, bg="#F44336", fg="white", relief="flat", padx=15)
+        
+        self.btn_new = tk.Button(btn_frame, text="✨ RESET FORM", command=self.reset_form_for_new, bg="#9E9E9E", fg="white", relief="flat", padx=10)
+        self.btn_add = tk.Button(btn_frame, text="➕ ADD ITEM", command=self.add_product, bg="#4CAF50", fg="white", relief="flat", padx=10)
+        self.btn_update = tk.Button(btn_frame, text="💾 UPDATE", command=self.update_product, bg="#2196F3", fg="white", relief="flat", padx=10)
+        self.btn_delete = tk.Button(btn_frame, text="🗑️ DELETE", command=self.delete_product, bg="#F44336", fg="white", relief="flat", padx=10)
+        
         self.btn_new.pack(side='left', padx=5)
         self.btn_add.pack(side='left', padx=5)
         self.btn_update.pack(side='left', padx=5)
         self.btn_delete.pack(side='left', padx=5)
+
+        # --- SYNC BUTTONS ---
+        sync_frame = tk.Frame(form_frame, bg="#2b2b2b")
+        sync_frame.grid(row=5, column=0, columnspan=4, pady=5)
+        tk.Button(sync_frame, text="🔄 SYNC FROM CLOUD", command=lambda: threading.Thread(target=self.sync_inventory_from_firebase, daemon=True).start(), 
+                  bg="#607D8B", fg="white", relief="flat", padx=10).pack(side='left', padx=5)
+        
+        # Only admin should push all data
+        if self.current_role == "Director":
+            tk.Button(sync_frame, text="☁️ PUSH ALL TO CLOUD", command=self.push_all_to_firebase, 
+                      bg="#E91E63", fg="white", relief="flat", padx=10).pack(side='left', padx=5)
+
         if self.current_role == "Attendant":
             self.btn_new.config(state="disabled", bg="#444444")
             self.btn_add.config(state="disabled", bg="#444444")
             self.btn_update.config(state="disabled", bg="#444444")
             self.btn_delete.config(state="disabled", bg="#444444")
             for key, entry in self.inventory_entries.items(): entry.config(state='disabled')
-            tk.Label(form_frame, text="🔒 RESTRICTED ACCESS: View Only", fg="#F44336", bg="#2b2b2b").grid(row=5, column=0, columnspan=4)
+            tk.Label(form_frame, text="🔒 RESTRICTED ACCESS: View Only", fg="#F44336", bg="#2b2b2b").grid(row=6, column=0, columnspan=4)
+        
         list_frame = ttk.LabelFrame(inventory_frame, text="Stock List", padding=10)
         list_frame.pack(fill='both', expand=True, padx=10, pady=10)
         self.inventory_tree = ttk.Treeview(list_frame, columns=('SKU', 'Title', 'Type', 'Category', 'Price', 'Cost', 'Stock'), show='headings')
@@ -327,6 +348,108 @@ class BookshopPOS:
     # --- LOGIC & PRINTING & UPLOADING ---
     # =========================================================================
 
+    # ---------------- NEW: CLOUD INVENTORY SYNC METHODS ----------------
+    def upload_product_to_firebase(self, product_data):
+        """Uploads a single product to Firebase using its SKU as key."""
+        try:
+            # Use SKU as the node key for easy updates
+            sku = product_data['sku']
+            url = f"{FIREBASE_URL}/products/{sku}.json"
+            response = requests.put(url, json=product_data)
+            if response.status_code == 200:
+                print(f"✅ Product {sku} synced to cloud.")
+            else:
+                print(f"❌ Failed to sync {sku}: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Cloud Sync Error: {e}")
+
+    def delete_product_from_firebase(self, sku):
+        """Deletes a product from Firebase."""
+        try:
+            url = f"{FIREBASE_URL}/products/{sku}.json"
+            requests.delete(url)
+            print(f"🗑️ Product {sku} deleted from cloud.")
+        except Exception as e:
+            print(f"❌ Cloud Delete Error: {e}")
+
+    def sync_inventory_from_firebase(self):
+        """Downloads all products from Firebase and updates local DB."""
+        print("🔄 Starting Cloud Sync...")
+        try:
+            url = f"{FIREBASE_URL}/products.json"
+            response = requests.get(url)
+            if response.status_code == 200 and response.json():
+                products = response.json()
+                
+                # Check if products is a list (some imports might do this) or dict
+                if isinstance(products, list):
+                    # Filter out None values if any
+                    items = [p for p in products if p is not None]
+                else:
+                    items = products.values()
+
+                conn = sqlite3.connect('bookshop.db')
+                cursor = conn.cursor()
+                
+                count = 0
+                for item in items:
+                    if not isinstance(item, dict) or 'sku' not in item: continue
+                    
+                    # Use INSERT OR REPLACE to update existing items
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO products 
+                        (sku, title, author_supplier, category, product_type, price, cost_price, stock, date_added)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        item.get('sku'),
+                        item.get('title'),
+                        item.get('author_supplier', ''),
+                        item.get('category', ''),
+                        item.get('product_type', 'Book'),
+                        float(item.get('price', 0)),
+                        float(item.get('cost_price', 0)),
+                        int(item.get('stock', 0)),
+                        item.get('date_added', datetime.now().strftime('%Y-%m-%d'))
+                    ))
+                    count += 1
+                
+                conn.commit()
+                conn.close()
+                
+                # Update UI in main thread
+                self.root.after(0, self.refresh_inventory)
+                self.root.after(0, lambda: messagebox.showinfo("Sync Complete", f"✅ Synced {count} items from Cloud."))
+            else:
+                print("Cloud inventory is empty or unreachable.")
+        except Exception as e:
+            print(f"❌ Sync Failed: {e}")
+
+    def push_all_to_firebase(self):
+        """Reads all local products and uploads them to Firebase (One-time migration)."""
+        if not messagebox.askyesno("Confirm Push", "This will overwrite Cloud data with Local data.\nContinue?"):
+            return
+        
+        def _push_task():
+            try:
+                self.cursor.execute("SELECT * FROM products")
+                rows = self.cursor.fetchall()
+                # Get column names
+                col_names = [description[0] for description in self.cursor.description]
+                
+                for row in rows:
+                    # Create dict from row
+                    item = dict(zip(col_names, row))
+                    # Remove internal ID, use SKU
+                    if 'id' in item: del item['id']
+                    self.upload_product_to_firebase(item)
+                
+                self.root.after(0, lambda: messagebox.showinfo("Success", "All items pushed to Cloud!"))
+            except Exception as e:
+                print(e)
+        
+        threading.Thread(target=_push_task, daemon=True).start()
+    # -------------------------------------------------------------------
+
     def print_receipt(self, receipt_data):
         """
         Sends formatted text to the Windows POS Printer
@@ -357,7 +480,7 @@ class BookshopPOS:
             text += f"PAID:          KES {receipt_data['paid']:,.2f}\n"
             text += f"CHANGE:        KES {receipt_data['change']:,.2f}\n"
             text += "-----------------------------\n"
-            text += "     Thank You! Karibu!      \n"
+            text += "      Thank You! Karibu!      \n"
             text += "\n\n\n\n" # Feed lines
             
             # 2. Send to Printer
@@ -379,12 +502,12 @@ class BookshopPOS:
             messagebox.showerror("Printer Error", f"Could not print receipt.\n\nCheck if printer is ON and name is correct.\n\nDetails: {str(e)}")
 
     def upload_to_firebase(self, data):
-        """Sends data to the web dashboard asynchronously using requests."""
+        """Sends sales data to the web dashboard."""
         try:
             url = f"{FIREBASE_URL}/sales.json"
             response = requests.post(url, json=data)
             if response.status_code == 200:
-                 print("✅ Data successfully uploaded to Firebase.")
+                 print("✅ Sale uploaded to Firebase.")
             else:
                  print(f"❌ Firebase Upload Failed. Status: {response.status_code}")
         except Exception as e:
@@ -411,6 +534,13 @@ class BookshopPOS:
             
             for i in self.cart:
                 self.cursor.execute("UPDATE products SET stock = stock - ? WHERE sku=?", (i['qty'], i['sku']))
+                
+                # --- UPDATE FIREBASE STOCK ---
+                # We need to calculate new stock to send to firebase
+                new_stock = self.cursor.execute("SELECT stock FROM products WHERE sku=?", (i['sku'],)).fetchone()[0]
+                # Update just the stock field in Firebase
+                threading.Thread(target=lambda s=i['sku'], st=new_stock: requests.patch(f"{FIREBASE_URL}/products/{s}.json", json={"stock": st}), daemon=True).start()
+
             self.conn.commit()
             
             # 3. Handle Printing
@@ -423,10 +553,10 @@ class BookshopPOS:
             }
             self.print_receipt(receipt_data)
             
-            # 4. ☁️ Upload to Firebase (Web Dashboard) in a separate thread
+            # 4. ☁️ Upload Sale to Firebase
             sale_data = {
                 "sale_date": date_str,
-                "timestamp": date_str, # Used by the dashboard for sorting/charting
+                "timestamp": date_str, 
                 "total_amount": self.cart_total,
                 "total_profit": profit,
                 "payment_method": self.payment_var.get(),
@@ -446,7 +576,6 @@ class BookshopPOS:
         except sqlite3.OperationalError as e:
              messagebox.showerror("Database Error", f"Database operation failed.\nError: {e}")
         except Exception as e:
-             # Catch all general errors that weren't specific to SQL or Value errors
              messagebox.showerror("System Error", f"An unexpected error occurred during sale completion.\nError: {e}")
 
     # --- Other Standard Methods ---
@@ -484,10 +613,22 @@ class BookshopPOS:
             data = {k: v.get().strip() for k, v in self.inventory_entries.items() if k in self.inventory_entries} 
             if not data['sku'] or not data['title']: return
             cost_price = float(data.get('cost_price') or 0.0) 
+            date_now = datetime.now().strftime('%Y-%m-%d')
+            
+            # 1. Local Save
             self.cursor.execute('INSERT INTO products (sku, title, author_supplier, category, product_type, price, cost_price, stock, date_added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                (data['sku'], data['title'], data['author_supplier'], data['category'], data['product_type'], float(data['price']), cost_price, int(data['stock']), datetime.now().strftime('%Y-%m-%d')))
+                                (data['sku'], data['title'], data['author_supplier'], data['category'], data['product_type'], float(data['price']), cost_price, int(data['stock']), date_now))
             self.conn.commit()
-            messagebox.showinfo("Success", "Product Added!")
+            
+            # 2. Cloud Upload (Threaded)
+            upload_data = data.copy()
+            upload_data['price'] = float(data['price'])
+            upload_data['cost_price'] = cost_price
+            upload_data['stock'] = int(data['stock'])
+            upload_data['date_added'] = date_now
+            threading.Thread(target=self.upload_product_to_firebase, args=(upload_data,), daemon=True).start()
+
+            messagebox.showinfo("Success", "Product Added & Uploaded!")
             self.refresh_inventory()
             self.reset_form_for_new()
         except Exception as e: messagebox.showerror("Error", str(e))
@@ -498,10 +639,21 @@ class BookshopPOS:
         try:
             data = {k: v.get().strip() for k, v in self.inventory_entries.items() if k in self.inventory_entries}
             cost_price_val = float(data.get('cost_price') or 0.0)
+            
+            # 1. Local Update
             self.cursor.execute('UPDATE products SET title=?, author_supplier=?, category=?, product_type=?, price=?, cost_price=?, stock=? WHERE sku=?',
                                 (data['title'], data['author_supplier'], data['category'], data['product_type'], float(data['price']), cost_price_val, int(data['stock']), sku))
             self.conn.commit()
-            messagebox.showinfo("Success", "Product Updated!")
+            
+            # 2. Cloud Update
+            upload_data = data.copy()
+            upload_data['price'] = float(data['price'])
+            upload_data['cost_price'] = cost_price_val
+            upload_data['stock'] = int(data['stock'])
+            # Since we use SKU as key, we can re-use the upload function to overwrite/update
+            threading.Thread(target=self.upload_product_to_firebase, args=(upload_data,), daemon=True).start()
+
+            messagebox.showinfo("Success", "Product Updated Locally & Cloud!")
             self.refresh_inventory()
             self.reset_form_for_new()
         except Exception as e: messagebox.showerror("Error", str(e))
@@ -510,8 +662,13 @@ class BookshopPOS:
         sku = self.inventory_entries['sku'].get()
         if not sku: return
         if messagebox.askyesno("Confirm", f"Delete item {sku}?"):
+            # 1. Local Delete
             self.cursor.execute("DELETE FROM products WHERE sku=?", (sku,))
             self.conn.commit()
+            
+            # 2. Cloud Delete
+            threading.Thread(target=self.delete_product_from_firebase, args=(sku,), daemon=True).start()
+
             self.refresh_inventory()
             self.reset_form_for_new()
 
@@ -607,16 +764,12 @@ class BookshopPOS:
     def __del__(self):
         if hasattr(self, 'conn'): self.conn.close()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     initialize_database()
-    def start_app(user, role): app = BookshopPOS(root, user, role)
     root = tk.Tk()
-    style = ttk.Style()
-    try:
-        root.tk.call("source", "azure.tcl")
-        root.tk.call("set_theme", "dark")
-    except:
-        style.theme_use('clam')
-        root.configure(bg="#2b2b2b")
-    login = LoginWindow(root, start_app)
+    
+    def start_pos(username, role):
+        app = BookshopPOS(root, username, role)
+        
+    login = LoginWindow(root, start_pos)
     root.mainloop()
