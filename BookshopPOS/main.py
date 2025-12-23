@@ -453,53 +453,64 @@ class BookshopPOS:
     def print_receipt(self, receipt_data):
         """
         Sends formatted text to the Windows POS Printer
+        Modified to print TWO copies (Customer + Shop)
         """
         if not win32print:
             messagebox.showwarning("Printing Error", "Required printer libraries not installed ('pywin32').\nReceipt not printed.")
             return
 
-        try:
-            # 1. Format the Receipt Text
-            text = "      HERIWADI BOOKSHOP      \n"
-            text += "      Tel: 0700-000-000      \n"
-            text += "-----------------------------\n"
-            text += f"Date: {receipt_data['date']}\n"
-            text += f"Served by: {self.current_user}\n"
-            text += "-----------------------------\n"
-            text += "ITEM           QTY     PRICE\n"
-            text += "-----------------------------\n"
+        # 1. Prepare the Common Body of the Receipt
+        # This part remains the same for both copies
+        body_text = "      HERIWADI BOOKSHOP      \n"
+        body_text += "      Tel: 0700-000-000      \n"
+        body_text += "-----------------------------\n"
+        body_text += f"Date: {receipt_data['date']}\n"
+        body_text += f"Served by: {self.current_user}\n"
+        body_text += "-----------------------------\n"
+        body_text += "ITEM            QTY     PRICE\n"
+        body_text += "-----------------------------\n"
+        
+        for item in receipt_data['items']:
+            # Truncate title if too long
+            title = (item['title'][:12] + '..') if len(item['title']) > 12 else item['title']
+            line = f"{title:<14} {item['qty']:<3} {item['price']*item['qty']:>8.2f}\n"
+            body_text += line
             
-            for item in receipt_data['items']:
-                # Truncate title if too long
-                title = (item['title'][:12] + '..') if len(item['title']) > 12 else item['title']
-                line = f"{title:<14} {item['qty']:<3} {item['price']*item['qty']:>8.2f}\n"
-                text += line
-                
-            text += "-----------------------------\n"
-            text += f"TOTAL:         KES {receipt_data['total']:,.2f}\n"
-            text += f"PAID:          KES {receipt_data['paid']:,.2f}\n"
-            text += f"CHANGE:        KES {receipt_data['change']:,.2f}\n"
-            text += "-----------------------------\n"
-            text += "      Thank You! Karibu!      \n"
-            text += "\n\n\n\n" # Feed lines
-            
-            # 2. Send to Printer
-            hPrinter = win32print.OpenPrinter(PRINTER_NAME)
+        body_text += "-----------------------------\n"
+        body_text += f"TOTAL:         KES {receipt_data['total']:,.2f}\n"
+        body_text += f"PAID:          KES {receipt_data['paid']:,.2f}\n"
+        body_text += f"CHANGE:        KES {receipt_data['change']:,.2f}\n"
+        body_text += "-----------------------------\n"
+        body_text += "      Thank You! Karibu!      \n"
+        body_text += "\n\n\n\n" # Feed lines
+
+        # 2. Define the Labels for the two copies
+        copies_to_print = ["*** CUSTOMER COPY ***", "*** SHOP RETAIN COPY ***"]
+
+        # 3. Loop through and print both copies
+        for copy_label in copies_to_print:
             try:
-                hJob = win32print.StartDocPrinter(hPrinter, 1, ("Receipt", None, "RAW"))
+                # Add the specific label to the top of the text
+                final_text = f"{copy_label}\n{body_text}"
+
+                hPrinter = win32print.OpenPrinter(PRINTER_NAME)
                 try:
-                    win32print.StartPagePrinter(hPrinter)
-                    win32print.WritePrinter(hPrinter, text.encode("utf-8"))
-                    # Cut Paper Command (Standard ESC/POS: GS V 66 0)
-                    win32print.WritePrinter(hPrinter, b'\x1d\x56\x42\x00') 
-                    win32print.EndPagePrinter(hPrinter)
+                    hJob = win32print.StartDocPrinter(hPrinter, 1, ("Receipt", None, "RAW"))
+                    try:
+                        win32print.StartPagePrinter(hPrinter)
+                        win32print.WritePrinter(hPrinter, final_text.encode("utf-8"))
+                        # Cut Paper Command (Standard ESC/POS: GS V 66 0)
+                        win32print.WritePrinter(hPrinter, b'\x1d\x56\x42\x00') 
+                        win32print.EndPagePrinter(hPrinter)
+                    finally:
+                        win32print.EndDocPrinter(hPrinter)
                 finally:
-                    win32print.EndDocPrinter(hPrinter)
-            finally:
-                win32print.ClosePrinter(hPrinter)
-                
-        except Exception as e:
-            messagebox.showerror("Printer Error", f"Could not print receipt.\n\nCheck if printer is ON and name is correct.\n\nDetails: {str(e)}")
+                    win32print.ClosePrinter(hPrinter)
+            
+            except Exception as e:
+                messagebox.showerror("Printer Error", f"Could not print {copy_label}.\n\nDetails: {str(e)}")
+                # If printing fails, stop the loop so we don't get two error messages
+                break
 
     def upload_to_firebase(self, data):
         """Sends sales data to the web dashboard."""
@@ -630,144 +641,198 @@ class BookshopPOS:
 
             messagebox.showinfo("Success", "Product Added & Uploaded!")
             self.refresh_inventory()
-            self.reset_form_for_new()
-        except Exception as e: messagebox.showerror("Error", str(e))
+            
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error", "SKU already exists!")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid Price/Stock values")
 
     def update_product(self):
-        sku = self.inventory_entries['sku'].get()
-        if self.inventory_entries['sku']['state'] == 'normal': return
+        if self.current_role == "Attendant": return
         try:
-            data = {k: v.get().strip() for k, v in self.inventory_entries.items() if k in self.inventory_entries}
-            cost_price_val = float(data.get('cost_price') or 0.0)
+            data = {k: v.get().strip() for k, v in self.inventory_entries.items() if k in self.inventory_entries} 
+            if not data['sku']: return
+            cost_price = float(data.get('cost_price') or 0.0)
             
             # 1. Local Update
-            self.cursor.execute('UPDATE products SET title=?, author_supplier=?, category=?, product_type=?, price=?, cost_price=?, stock=? WHERE sku=?',
-                                (data['title'], data['author_supplier'], data['category'], data['product_type'], float(data['price']), cost_price_val, int(data['stock']), sku))
+            self.cursor.execute('''
+                UPDATE products SET title=?, author_supplier=?, category=?, product_type=?, price=?, cost_price=?, stock=?
+                WHERE sku=?
+            ''', (data['title'], data['author_supplier'], data['category'], data['product_type'], 
+                  float(data['price']), cost_price, int(data['stock']), data['sku']))
             self.conn.commit()
             
             # 2. Cloud Update
             upload_data = data.copy()
             upload_data['price'] = float(data['price'])
-            upload_data['cost_price'] = cost_price_val
+            upload_data['cost_price'] = cost_price
             upload_data['stock'] = int(data['stock'])
-            # Since we use SKU as key, we can re-use the upload function to overwrite/update
             threading.Thread(target=self.upload_product_to_firebase, args=(upload_data,), daemon=True).start()
 
-            messagebox.showinfo("Success", "Product Updated Locally & Cloud!")
+            messagebox.showinfo("Success", "Product Updated!")
             self.refresh_inventory()
             self.reset_form_for_new()
-        except Exception as e: messagebox.showerror("Error", str(e))
+        except Exception as e:
+            messagebox.showerror("Error", f"Update failed: {e}")
 
     def delete_product(self):
+        if self.current_role == "Attendant": return
         sku = self.inventory_entries['sku'].get()
         if not sku: return
-        if messagebox.askyesno("Confirm", f"Delete item {sku}?"):
-            # 1. Local Delete
+        if messagebox.askyesno("Confirm", "Delete this item?"):
             self.cursor.execute("DELETE FROM products WHERE sku=?", (sku,))
             self.conn.commit()
-            
-            # 2. Cloud Delete
             threading.Thread(target=self.delete_product_from_firebase, args=(sku,), daemon=True).start()
-
             self.refresh_inventory()
             self.reset_form_for_new()
 
-    def refresh_inventory(self):
-        for i in self.inventory_tree.get_children(): self.inventory_tree.delete(i)
-        self.cursor.execute('SELECT sku, title, product_type, category, price, cost_price, stock FROM products')
-        for row in self.cursor.fetchall(): self.inventory_tree.insert('', 'end', values=row)
-
     def search_product(self):
-        q = self.search_entry.get().strip()
-        for i in self.search_tree.get_children(): self.search_tree.delete(i)
-        self.cursor.execute("SELECT sku, title, product_type, price, stock, cost_price FROM products WHERE sku LIKE ? OR title LIKE ?", (f'%{q}%', f'%{q}%'))
-        for row in self.cursor.fetchall(): self.search_tree.insert('', 'end', values=row[:5], tags=(row[5],))
+        query = self.search_entry.get().strip()
+        self.search_tree.delete(*self.search_tree.get_children())
+        if not query:
+            self.cursor.execute("SELECT sku, title, product_type, price, stock FROM products WHERE stock > 0 LIMIT 20")
+        else:
+            self.cursor.execute("SELECT sku, title, product_type, price, stock FROM products WHERE (sku LIKE ? OR title LIKE ?) AND stock > 0", 
+                                (f'%{query}%', f'%{query}%'))
+        for row in self.cursor.fetchall():
+            self.search_tree.insert('', 'end', values=row)
 
     def add_to_cart(self):
-        sel = self.search_tree.selection()
-        if not sel: return
-        val = self.search_tree.item(sel[0])['values']
-        cost = self.search_tree.item(sel[0])['tags'][0]
-        qty = simpledialog.askinteger("Qty", "Enter Quantity:", parent=self.root, minvalue=1, maxvalue=val[4])
-        if qty:
-            self.cart.append({'sku': val[0], 'title': val[1], 'type': val[2], 'price': float(val[3]), 'cost': float(cost), 'qty': qty})
-            self.update_cart_ui()
+        selection = self.search_tree.selection()
+        if not selection: return
+        item_vals = self.search_tree.item(selection[0])['values']
+        
+        # Check if already in cart
+        for i, item in enumerate(self.cart):
+            if item['sku'] == item_vals[0]:
+                if item['qty'] + 1 > item_vals[4]:
+                     messagebox.showwarning("Stock", "Not enough stock available!")
+                     return
+                item['qty'] += 1
+                self.update_cart_ui()
+                return
+        
+        # Query cost price for profit calculation
+        self.cursor.execute("SELECT cost_price FROM products WHERE sku=?", (item_vals[0],))
+        cost = self.cursor.fetchone()[0]
+        
+        self.cart.append({
+            'sku': item_vals[0],
+            'title': item_vals[1],
+            'price': float(item_vals[3]),
+            'cost': cost,
+            'qty': 1
+        })
+        self.update_cart_ui()
 
     def update_cart_ui(self):
-        self.cart_text.delete('1.0', 'end')
+        self.cart_text.delete(1.0, 'end')
         self.cart_total = 0.0
         for item in self.cart:
-            sub = item['price'] * item['qty']
-            self.cart_total += sub
-            self.cart_text.insert('end', f"{item['title']} x{item['qty']} = {sub:.2f}\n")
+            line_total = item['price'] * item['qty']
+            self.cart_total += line_total
+            self.cart_text.insert('end', f"{item['title']} x{item['qty']} = {line_total:,.2f}\n")
         self.total_label.config(text=f"KES {self.cart_total:,.2f}")
-
-    def calculate_change(self, e):
-        try:
-            paid = float(self.amount_paid_entry.get())
-            self.change_label.config(text=f"Change: KES {paid - self.cart_total:,.2f}")
-        except: pass
-
-    def generate_report(self):
-        self.reports_text.delete('1.0', 'end')
-        show_profit = True if self.current_role == "Director" else False 
-        today = datetime.now().strftime('%Y-%m-%d')
-        try:
-            self.cursor.execute("SELECT count(*), sum(total_amount), sum(total_profit) FROM sales WHERE date(sale_date)=?", (today,))
-            res = self.cursor.fetchone()
-        except sqlite3.OperationalError:
-            self.cursor.execute("SELECT count(*), sum(total_amount) FROM sales WHERE date(sale_date)=?", (today,))
-            temp_res = self.cursor.fetchone()
-            res = (temp_res[0], temp_res[1], 0.0)
-        txt = f"REPORT ({today})\nTransactions: {res[0] or 0}\nRevenue: KES {res[1] or 0:,.2f}\n"
-        if show_profit: txt += f"Profit: KES {res[2] or 0:,.2f}\n"
-        else: txt += "Profit: [HIDDEN]\n" 
-        self.reports_text.insert('end', txt)
-        for i in self.sales_tree.get_children(): self.sales_tree.delete(i)
-        self.cursor.execute("SELECT id, total_amount, sale_date FROM sales ORDER BY id DESC LIMIT 20")
-        for row in self.cursor.fetchall(): self.sales_tree.insert('', 'end', values=row)
-
-    def export_sales_to_csv(self):
-        filename = f"sales_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        self.cursor.execute('SELECT * FROM sales')
-        sales_data = self.cursor.fetchall()
-        try:
-            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(['ID', 'Date', 'Total', 'Profit', 'Method', 'Items'])
-                writer.writerows(sales_data)
-            messagebox.showinfo("Export Successful", f"Saved to {filename}")
-        except Exception as e: messagebox.showerror("Error", str(e))
-        
-    def delete_sale_prompt(self):
-        selection = self.sales_tree.selection()
-        if not selection: return
-        sale_id = self.sales_tree.item(selection[0])['values'][0]
-        if messagebox.askyesno("Confirm", f"Delete Sale {sale_id}?"):
-            try:
-                self.cursor.execute('SELECT items_json FROM sales WHERE id = ?', (sale_id,))
-                items = json.loads(self.cursor.fetchone()[0])
-                for item in items:
-                    self.cursor.execute('UPDATE products SET stock = stock + ? WHERE sku = ?', (item['qty'], item['sku']))
-                self.cursor.execute('DELETE FROM sales WHERE id = ?', (sale_id,))
-                self.conn.commit()
-                self.generate_report()
-            except Exception as e: messagebox.showerror("Error", str(e))
+        self.calculate_change()
 
     def clear_cart(self):
         self.cart = []
         self.update_cart_ui()
         self.amount_paid_entry.delete(0, 'end')
-        self.change_label.config(text="Change: KES 0.00")
-        messagebox.showinfo("Cart Cleared", "The shopping cart has been emptied.")
 
-    def __del__(self):
-        if hasattr(self, 'conn'): self.conn.close()
+    def calculate_change(self, event=None):
+        try:
+            paid = float(self.amount_paid_entry.get())
+            change = paid - self.cart_total
+            self.change_label.config(text=f"Change: KES {change:,.2f}", fg="#4CAF50" if change >= 0 else "#F44336")
+        except ValueError:
+            self.change_label.config(text="Change: KES 0.00")
 
-if __name__ == '__main__':
+    def refresh_inventory(self):
+        self.inventory_tree.delete(*self.inventory_tree.get_children())
+        self.cursor.execute("SELECT sku, title, product_type, category, price, cost_price, stock FROM products")
+        for row in self.cursor.fetchall():
+            self.inventory_tree.insert('', 'end', values=row)
+
+    def generate_report(self):
+        self.sales_tree.delete(*self.sales_tree.get_children())
+        self.reports_text.delete(1.0, 'end')
+        
+        # Daily Sales
+        today = datetime.now().strftime('%Y-%m-%d')
+        self.cursor.execute("SELECT sum(total_amount), sum(total_profit) FROM sales WHERE sale_date LIKE ?", (f'{today}%',))
+        res = self.cursor.fetchone()
+        daily_sales = res[0] or 0.0
+        daily_profit = res[1] or 0.0
+        
+        # Total Sales
+        self.cursor.execute("SELECT sum(total_amount), sum(total_profit) FROM sales")
+        res_total = self.cursor.fetchone()
+        total_sales = res_total[0] or 0.0
+        total_profit = res_total[1] or 0.0
+        
+        report = f"📊 SALES REPORT ({datetime.now().strftime('%d-%b-%Y')})\n"
+        report += "========================================\n"
+        report += f"TODAY'S SALES:      KES {daily_sales:,.2f}\n"
+        report += f"TODAY'S PROFIT:     KES {daily_profit:,.2f}\n"
+        report += "----------------------------------------\n"
+        report += f"LIFETIME SALES:     KES {total_sales:,.2f}\n"
+        report += f"LIFETIME PROFIT:    KES {total_profit:,.2f}\n"
+        report += "========================================\n"
+        
+        self.reports_text.insert('end', report)
+        
+        # Populate List
+        self.cursor.execute("SELECT id, total_amount, sale_date FROM sales ORDER BY id DESC LIMIT 50")
+        for row in self.cursor.fetchall():
+            self.sales_tree.insert('', 'end', values=row)
+
+    def export_sales_to_csv(self):
+        try:
+            filename = f"sales_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            self.cursor.execute("SELECT * FROM sales")
+            rows = self.cursor.fetchall()
+            col_names = [description[0] for description in self.cursor.description]
+            
+            with open(filename, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(col_names)
+                writer.writerows(rows)
+            messagebox.showinfo("Export", f"Exported to {filename}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def delete_sale_prompt(self):
+        selection = self.sales_tree.selection()
+        if not selection: return
+        sale_id = self.sales_tree.item(selection[0])['values'][0]
+        
+        if messagebox.askyesno("Delete Sale", "This will revert stock counts locally.\nContinue?"):
+            # 1. Revert Stock
+            self.cursor.execute("SELECT items_json FROM sales WHERE id=?", (sale_id,))
+            items_json = self.cursor.fetchone()[0]
+            items = json.loads(items_json)
+            for item in items:
+                self.cursor.execute("UPDATE products SET stock = stock + ? WHERE sku=?", (item['qty'], item['sku']))
+                # Revert Firebase Stock
+                new_stock = self.cursor.execute("SELECT stock FROM products WHERE sku=?", (item['sku'],)).fetchone()[0]
+                threading.Thread(target=lambda s=item['sku'], st=new_stock: requests.patch(f"{FIREBASE_URL}/products/{s}.json", json={"stock": st}), daemon=True).start()
+
+            # 2. Delete Record
+            self.cursor.execute("DELETE FROM sales WHERE id=?", (sale_id,))
+            self.conn.commit()
+            
+            # 3. Delete from Firebase (Optional/Complex - requires ID mapping, skipped for simplicity)
+            
+            messagebox.showinfo("Deleted", "Sale deleted and stock reverted.")
+            self.generate_report()
+            self.refresh_inventory()
+
+if __name__ == "__main__":
     initialize_database()
     root = tk.Tk()
     
+    # Simple Login Wrapper
     def start_pos(username, role):
         app = BookshopPOS(root, username, role)
         
