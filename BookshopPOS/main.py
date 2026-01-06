@@ -6,14 +6,13 @@ import json
 import os
 import hashlib
 import csv
-import threading # For non-blocking Firebase upload
-import requests # For communicating with Firebase REST API
+import threading
+import requests
 
 # --- TRY IMPORTING PRINTER LIBRARIES ---
 try:
     import win32print
     import win32ui
-    # Note: If win32print fails, ensure you run 'pip install pywin32'
 except ImportError:
     win32print = None
     print("⚠️ WARNING: 'pywin32' not installed. Printing will not work.")
@@ -21,13 +20,26 @@ except ImportError:
 # ==========================================
 # CONFIGURATION
 # ==========================================
-PRINTER_NAME = "BTP-R880NP(U) 1" 
+PRINTER_NAME = "BTP-R880NP(U) 1"
 # 👇 REPLACE WITH YOUR ACTUAL FIREBASE DB URL
-FIREBASE_URL = "https://heriwadi-bookshop-default-rtdb.firebaseio.com" 
-# ==========================================
+FIREBASE_URL = "https://heriwadi-bookshop-default-rtdb.firebaseio.com"
 
 # ==========================================
-# --- DATABASE SETUP FUNCTION ---
+# THEME CONFIGURATION
+# ==========================================
+COLORS = {
+    "bg_dark": "#1e1e1e",       # Main Window Background
+    "bg_panel": "#2d2d2d",      # Panels/Frames
+    "text_light": "#ffffff",    # Main Text
+    "text_dim": "#a0a0a0",      # Secondary Text
+    "accent_blue": "#3b8ed0",   # Primary Actions
+    "accent_green": "#00e676",  # Success/Pay
+    "accent_red": "#ef5350",    # Danger/Delete
+    "accent_orange": "#ffab40"  # Warning/Discount
+}
+
+# ==========================================
+# DATABASE SETUP FUNCTION
 # ==========================================
 def initialize_database():
     conn = sqlite3.connect('bookshop.db')
@@ -55,19 +67,27 @@ def initialize_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sale_date TEXT NOT NULL,
             total_amount REAL NOT NULL,
+            discount REAL DEFAULT 0.0,
             total_profit REAL DEFAULT 0.0, 
             payment_method TEXT,
             items_json TEXT 
         )
     ''')
 
-    # --- MIGRATION CHECK ---
+    # --- MIGRATION CHECKS ---
+    # Check for total_profit
     try:
         cursor.execute("SELECT total_profit FROM sales LIMIT 1")
     except sqlite3.OperationalError:
-        print("⚠️ Updating database: Adding missing column 'total_profit'...")
+        print("⚠️ Updating database: Adding 'total_profit'...")
         cursor.execute("ALTER TABLE sales ADD COLUMN total_profit REAL DEFAULT 0.0")
-        conn.commit()
+    
+    # Check for discount
+    try:
+        cursor.execute("SELECT discount FROM sales LIMIT 1")
+    except sqlite3.OperationalError:
+        print("⚠️ Updating database: Adding 'discount'...")
+        cursor.execute("ALTER TABLE sales ADD COLUMN discount REAL DEFAULT 0.0")
     
     # 3. Create Users Table
     cursor.execute('''
@@ -84,15 +104,43 @@ def initialize_database():
     if cursor.fetchone()[0] == 0:
         admin_pw = hashlib.sha256("admin123".encode()).hexdigest()
         user_pw = hashlib.sha256("user123".encode()).hexdigest()
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", ("admin", admin_pw, "Director"))
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", ("user", user_pw, "Attendant"))
         
-        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
-                       ("admin", admin_pw, "Director"))
-        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", 
-                       ("user", user_pw, "Attendant"))
-        conn.commit()
-    
     conn.commit()
     conn.close()
+
+# ==========================================
+# STYLING CLASS
+# ==========================================
+def apply_styles(root):
+    style = ttk.Style(root)
+    style.theme_use('clam')
+    
+    # General Frame Styles
+    style.configure("TFrame", background=COLORS["bg_dark"])
+    style.configure("Panel.TFrame", background=COLORS["bg_panel"])
+    style.configure("TLabel", background=COLORS["bg_panel"], foreground=COLORS["text_light"], font=('Segoe UI', 11))
+    style.configure("Title.TLabel", background=COLORS["bg_panel"], foreground=COLORS["accent_blue"], font=('Segoe UI', 14, 'bold'))
+    
+    # Buttons
+    style.configure("TButton", font=('Segoe UI', 10, 'bold'), borderwidth=0, focuscolor="none")
+    style.map("TButton", background=[('active', '#444444')])
+
+    # Treeview (Lists)
+    style.configure("Treeview", 
+                    background="#333333", 
+                    foreground="white", 
+                    fieldbackground="#333333", 
+                    font=('Segoe UI', 11),
+                    rowheight=30)
+    style.configure("Treeview.Heading", font=('Segoe UI', 11, 'bold'), background="#444444", foreground="white")
+    style.map("Treeview", background=[('selected', COLORS['accent_blue'])])
+    
+    # Notebook (Tabs)
+    style.configure("TNotebook", background=COLORS["bg_dark"], borderwidth=0)
+    style.configure("TNotebook.Tab", background="#444444", foreground="white", padding=[15, 8], font=('Segoe UI', 11))
+    style.map("TNotebook.Tab", background=[('selected', COLORS['accent_blue'])])
 
 # ==========================================
 # LOGIN WINDOW
@@ -101,41 +149,52 @@ class LoginWindow:
     def __init__(self, root, on_login_success):
         self.root = root
         self.on_login_success = on_login_success
-        self.root.title("🔐 Login - HERIWADI BOOKSHOP")
-        self.root.geometry("1000x600") 
-        self.login_frame = tk.Frame(root, bg="#2b2b2b")
-        self.login_frame.pack(expand=True, fill='both')
-        center_frame = tk.Frame(self.login_frame, bg="#2b2b2b")
+        self.root.title("Login - HERIWADI BOOKSHOP")
+        self.root.geometry("900x600")
+        self.root.configure(bg=COLORS["bg_dark"])
+        
+        # Center Box
+        center_frame = tk.Frame(root, bg=COLORS["bg_panel"], padx=40, pady=40)
         center_frame.place(relx=0.5, rely=0.5, anchor='center')
-        tk.Label(center_frame, text="HERIWADI POS", font=('Segoe UI', 24, 'bold'), bg="#2b2b2b", fg="#4CAF50").pack(pady=(0, 40))
-        tk.Label(center_frame, text="Username:", font=('Segoe UI', 12), bg="#2b2b2b", fg="#cccccc").pack(anchor='w', fill='x')
-        self.user_entry = ttk.Entry(center_frame, font=('Segoe UI', 14), width=30)
-        self.user_entry.pack(pady=(5, 20))
+        
+        # Logo/Title
+        tk.Label(center_frame, text="HERIWADI", font=('Segoe UI', 32, 'bold'), bg=COLORS["bg_panel"], fg=COLORS["text_light"]).pack()
+        tk.Label(center_frame, text="Management System", font=('Segoe UI', 14), bg=COLORS["bg_panel"], fg=COLORS["accent_blue"]).pack(pady=(0, 30))
+
+        # Inputs
+        tk.Label(center_frame, text="Username", font=('Segoe UI', 10, 'bold'), bg=COLORS["bg_panel"], fg=COLORS["text_dim"]).pack(anchor='w')
+        self.user_entry = tk.Entry(center_frame, font=('Segoe UI', 14), width=25, bg="#444444", fg="white", insertbackground="white", relief="flat")
+        self.user_entry.pack(pady=(5, 15), ipady=5)
         self.user_entry.focus()
-        tk.Label(center_frame, text="Password:", font=('Segoe UI', 12), bg="#2b2b2b", fg="#cccccc").pack(anchor='w', fill='x')
-        self.pass_entry = ttk.Entry(center_frame, font=('Segoe UI', 14), width=30, show="•")
-        self.pass_entry.pack(pady=(5, 30))
+        
+        tk.Label(center_frame, text="Password", font=('Segoe UI', 10, 'bold'), bg=COLORS["bg_panel"], fg=COLORS["text_dim"]).pack(anchor='w')
+        self.pass_entry = tk.Entry(center_frame, font=('Segoe UI', 14), width=25, bg="#444444", fg="white", insertbackground="white", relief="flat", show="•")
+        self.pass_entry.pack(pady=(5, 25), ipady=5)
         self.pass_entry.bind('<Return>', self.attempt_login)
-        btn = tk.Button(center_frame, text="LOGIN", command=self.attempt_login, 
-                        bg="#2196F3", fg="white", font=('Segoe UI', 12, 'bold'), 
-                        relief='flat', padx=20, pady=12, cursor="hand2")
-        btn.pack(fill='x')
+        
+        # Login Button
+        btn = tk.Button(center_frame, text="LOG IN", command=self.attempt_login, 
+                        bg=COLORS["accent_blue"], fg="white", font=('Segoe UI', 12, 'bold'), 
+                        relief='flat', activebackground="#2c6e91", activeforeground="white", cursor="hand2")
+        btn.pack(fill='x', ipady=8)
 
     def attempt_login(self, event=None):
         username = self.user_entry.get().strip()
         password = self.pass_entry.get().strip()
         hashed_pw = hashlib.sha256(password.encode()).hexdigest()
+        
         conn = sqlite3.connect('bookshop.db')
         cursor = conn.cursor()
         cursor.execute("SELECT role FROM users WHERE username=? AND password_hash=?", (username, hashed_pw))
         result = cursor.fetchone()
         conn.close()
+        
         if result:
             role = result[0]
-            self.login_frame.destroy() 
+            for widget in self.root.winfo_children(): widget.destroy() # Clear login screen
             self.on_login_success(username, role)
         else:
-            messagebox.showerror("Login Failed", "Invalid Username or Password")
+            messagebox.showerror("Access Denied", "Invalid Username or Password")
 
 # ==========================================
 # MAIN POS APPLICATION
@@ -145,22 +204,26 @@ class BookshopPOS:
         self.root = root
         self.current_user = username
         self.current_role = role 
-        self.root.title(f"📚 HERIWADI BOOKSHOP POS | Logged in as: {username.upper()} ({role})")
-        self.root.geometry("1300x750")
+        
+        self.root.title(f"HERIWADI BOOKSHOP POS | {username.upper()} ({role})")
+        self.root.geometry("1400x850")
+        self.root.configure(bg=COLORS["bg_dark"])
+        apply_styles(self.root)
         
         self.conn = sqlite3.connect('bookshop.db')
         self.cursor = self.conn.cursor()
         
+        # Cart Variables
         self.cart = []
-        self.cart_total = 0.0
+        self.subtotal = 0.0
+        self.discount_amount = 0.0
+        self.final_total = 0.0
         
         self.create_ui()
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
         
-        # Initial Load
+        # Initial Load & Sync
         self.refresh_inventory()
-        
-        # Auto-Sync on startup (Threaded to not freeze UI)
         threading.Thread(target=self.sync_inventory_from_firebase, daemon=True).start()
 
     def on_tab_change(self, event):
@@ -171,8 +234,22 @@ class BookshopPOS:
             self.refresh_inventory()
 
     def create_ui(self):
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        # Main Container
+        main_container = tk.Frame(self.root, bg=COLORS["bg_dark"])
+        main_container.pack(fill='both', expand=True, padx=20, pady=20)
+
+        # Header
+        header = tk.Frame(main_container, bg=COLORS["bg_dark"])
+        header.pack(fill='x', pady=(0, 15))
+        tk.Label(header, text="HERIWADI BOOKSHOP", font=('Segoe UI', 24, 'bold'), bg=COLORS["bg_dark"], fg=COLORS["text_light"]).pack(side='left')
+        
+        status_color = COLORS['accent_green'] if self.current_role == "Director" else COLORS['accent_blue']
+        tk.Label(header, text=f"👤 {self.current_user.upper()}", font=('Segoe UI', 12, 'bold'), bg=status_color, fg="black", padx=10, pady=5).pack(side='right')
+
+        # Tabs
+        self.notebook = ttk.Notebook(main_container)
+        self.notebook.pack(fill='both', expand=True)
+        
         self.create_sales_tab()
         self.create_inventory_tab()
         self.create_reports_tab()
@@ -181,660 +258,551 @@ class BookshopPOS:
     # 🛒 SALES TAB
     # =========================================================================
     def create_sales_tab(self):
-        sales_frame = ttk.Frame(self.notebook)
+        sales_frame = ttk.Frame(self.notebook, style="Panel.TFrame")
         self.notebook.add(sales_frame, text="🛒 POS Terminal")
-        left_frame = ttk.Frame(sales_frame)
+        
+        # --- LEFT: SEARCH & PRODUCT LIST ---
+        left_frame = tk.Frame(sales_frame, bg=COLORS["bg_panel"])
         left_frame.pack(side='left', fill='both', expand=True, padx=10, pady=10)
-        search_frame = ttk.LabelFrame(left_frame, text="🔍 Product Search", padding=10)
-        search_frame.pack(fill='x', pady=(0, 10))
-        ttk.Label(search_frame, text="SKU / Title:").pack(side='left', padx=5)
-        self.search_entry = ttk.Entry(search_frame, width=30)
-        self.search_entry.pack(side='left', padx=5)
+        
+        # Search Bar
+        search_box = tk.Frame(left_frame, bg=COLORS["bg_panel"])
+        search_box.pack(fill='x', pady=(0, 10))
+        tk.Label(search_box, text="Search Product (SKU/Title):", font=('Segoe UI', 11, 'bold')).pack(anchor='w', pady=(0,5))
+        
+        self.search_entry = tk.Entry(search_box, font=('Segoe UI', 14), bg="#444444", fg="white", relief="flat", insertbackground="white")
+        self.search_entry.pack(fill='x', ipady=8)
         self.search_entry.bind('<Return>', lambda e: self.search_product())
-        tk.Button(search_frame, text="SEARCH", command=self.search_product, 
-                  bg="#2196F3", fg="white", relief="flat").pack(side='left', padx=5)
-        self.search_results_frame = ttk.LabelFrame(left_frame, text="Available Products", padding=10)
-        self.search_results_frame.pack(fill='both', expand=True, pady=(0, 10))
-        self.search_tree = ttk.Treeview(self.search_results_frame, 
-                                        columns=('SKU', 'Title', 'Type', 'Price', 'Stock'),
-                                        show='headings', height=10)
+        self.search_entry.bind('<KeyRelease>', lambda e: self.search_product()) # Auto search on type
+
+        # Results Table
+        self.search_tree = ttk.Treeview(left_frame, columns=('SKU', 'Title', 'Price', 'Stock'), show='headings', height=15)
         self.search_tree.heading('SKU', text='SKU')
-        self.search_tree.heading('Title', text='Title')
-        self.search_tree.heading('Type', text='Type')
-        self.search_tree.heading('Price', text='Price')
-        self.search_tree.heading('Stock', text='Stock')
+        self.search_tree.heading('Title', text='ITEM TITLE')
+        self.search_tree.heading('Price', text='PRICE')
+        self.search_tree.heading('Stock', text='STOCK')
+        
         self.search_tree.column('SKU', width=80)
-        self.search_tree.column('Title', width=200)
-        self.search_tree.column('Type', width=80)
+        self.search_tree.column('Title', width=300)
         self.search_tree.column('Price', width=80)
         self.search_tree.column('Stock', width=60)
+        
         self.search_tree.pack(fill='both', expand=True)
         self.search_tree.bind('<Double-1>', lambda e: self.add_to_cart())
-        tk.Button(left_frame, text="➕ ADD TO CART", command=self.add_to_cart, 
-                  bg="#FFC107", fg="black", font=('Segoe UI', 10, 'bold'), relief="flat").pack(pady=5, fill='x')
-        right_frame = ttk.Frame(sales_frame)
-        right_frame.pack(side='right', fill='both', expand=True, padx=10, pady=10)
-        cart_frame = ttk.LabelFrame(right_frame, text="🛒 Shopping Cart", padding=10)
-        cart_frame.pack(fill='both', expand=True, pady=(0, 10))
-        self.cart_text = scrolledtext.ScrolledText(cart_frame, height=15, width=45, bg="#383838", fg="white", font=('Consolas', 11))
-        self.cart_text.pack(fill='both', expand=True)
-        total_frame = tk.Frame(right_frame, bg="#222222")
-        total_frame.pack(fill='x', pady=10)
-        tk.Label(total_frame, text="TOTAL TO PAY:", font=('Segoe UI', 14), bg="#222222", fg="#aaaaaa").pack(anchor='w')
-        self.total_label = tk.Label(total_frame, text="KES 0.00", font=('Segoe UI', 24, 'bold'), bg="#222222", fg="#4CAF50")
+        self.search_tree.bind('<Return>', lambda e: self.add_to_cart())
+
+        tk.Button(left_frame, text="ADD SELECTED TO CART ➡", command=self.add_to_cart, 
+                  bg=COLORS["accent_blue"], fg="white", font=('Segoe UI', 11, 'bold'), relief="flat", pady=10).pack(fill='x', pady=10)
+
+        # --- RIGHT: CART & PAYMENT ---
+        right_frame = tk.Frame(sales_frame, bg="#252525", width=400)
+        right_frame.pack(side='right', fill='y', padx=(10, 0), pady=10)
+        right_frame.pack_propagate(False) # Force width
+        
+        tk.Label(right_frame, text="CURRENT ORDER", font=('Segoe UI', 14, 'bold'), bg="#252525", fg="#aaaaaa").pack(pady=10)
+
+        # Cart Display
+        self.cart_text = scrolledtext.ScrolledText(right_frame, height=12, bg="#1e1e1e", fg="white", font=('Consolas', 11), relief="flat", padx=10, pady=10)
+        self.cart_text.pack(fill='x', padx=10)
+        
+        # Totals Section
+        totals_frame = tk.Frame(right_frame, bg="#252525")
+        totals_frame.pack(fill='x', padx=10, pady=10)
+        
+        self.lbl_subtotal = tk.Label(totals_frame, text="Subtotal: 0.00", font=('Segoe UI', 11), bg="#252525", fg="#cccccc")
+        self.lbl_subtotal.pack(anchor='e')
+        
+        self.lbl_discount = tk.Label(totals_frame, text="Discount: -0.00", font=('Segoe UI', 11), bg="#252525", fg=COLORS["accent_orange"])
+        self.lbl_discount.pack(anchor='e')
+
+        tk.Frame(totals_frame, height=2, bg="#444444").pack(fill='x', pady=5) # Divider
+
+        tk.Label(totals_frame, text="TOTAL TO PAY", font=('Segoe UI', 10), bg="#252525", fg="#aaaaaa").pack(anchor='w')
+        self.total_label = tk.Label(totals_frame, text="KES 0.00", font=('Segoe UI', 28, 'bold'), bg="#252525", fg=COLORS["accent_green"])
         self.total_label.pack(anchor='e')
-        pay_frame = ttk.LabelFrame(right_frame, text="Payment Details", padding=10)
-        pay_frame.pack(fill='x', pady=10)
-        ttk.Label(pay_frame, text="Method:").grid(row=0, column=0, pady=5, sticky='w')
+
+        # Action Buttons (Discount & Clear)
+        action_row = tk.Frame(right_frame, bg="#252525")
+        action_row.pack(fill='x', padx=10)
+        
+        tk.Button(action_row, text="✂️ DISCOUNT", command=self.prompt_discount, 
+                  bg=COLORS["accent_orange"], fg="black", font=('Segoe UI', 10, 'bold'), relief="flat").pack(side='left', fill='x', expand=True, padx=(0,2))
+        
+        tk.Button(action_row, text="🗑️ CLEAR", command=self.clear_cart, 
+                  bg=COLORS["accent_red"], fg="white", font=('Segoe UI', 10, 'bold'), relief="flat").pack(side='left', fill='x', expand=True, padx=(2,0))
+
+        # Payment Inputs
+        pay_frame = tk.LabelFrame(right_frame, text="Process Payment", bg="#252525", fg="#aaaaaa", font=('Segoe UI', 10), padx=10, pady=10, relief="flat")
+        pay_frame.pack(fill='x', padx=10, pady=10)
+        
         self.payment_var = tk.StringVar(value="Cash")
-        ttk.Combobox(pay_frame, textvariable=self.payment_var, values=["Cash", "M-Pesa", "Card"], state="readonly").grid(row=0, column=1, padx=5, sticky='ew')
-        ttk.Label(pay_frame, text="Amount Paid:").grid(row=1, column=0, pady=5, sticky='w')
-        self.amount_paid_entry = ttk.Entry(pay_frame)
-        self.amount_paid_entry.grid(row=1, column=1, padx=5, sticky='ew')
+        ttk.Combobox(pay_frame, textvariable=self.payment_var, values=["Cash", "M-Pesa", "Card"], state="readonly", font=('Segoe UI', 12)).pack(fill='x', pady=(0, 10))
+        
+        self.amount_paid_entry = tk.Entry(pay_frame, font=('Segoe UI', 14), bg="#444444", fg="white", insertbackground="white", relief="flat")
+        self.amount_paid_entry.pack(fill='x', ipady=5)
         self.amount_paid_entry.bind('<KeyRelease>', self.calculate_change)
-        self.change_label = tk.Label(pay_frame, text="Change: KES 0.00", bg="#2b2b2b", fg="#FFC107", font=('Segoe UI', 11, 'bold'))
-        self.change_label.grid(row=2, column=0, columnspan=2, pady=10)
-        btn_frame = tk.Frame(right_frame, bg="#2b2b2b")
-        btn_frame.pack(fill='x')
-        tk.Button(btn_frame, text="✅ COMPLETE SALE", command=self.complete_sale, 
-                  bg="#4CAF50", fg="white", font=('Segoe UI', 12, 'bold'), relief="flat", pady=10).pack(side='left', fill='x', expand=True, padx=(0, 5))
-        tk.Button(btn_frame, text="❌ CLEAR", command=self.clear_cart, 
-                  bg="#F44336", fg="white", font=('Segoe UI', 12, 'bold'), relief="flat", pady=10).pack(side='left', fill='x', expand=True, padx=(5, 0))
+        
+        self.change_label = tk.Label(pay_frame, text="Change: KES 0.00", bg="#252525", fg="#aaaaaa", font=('Segoe UI', 11))
+        self.change_label.pack(pady=(10, 0))
+
+        # Complete Button
+        tk.Button(right_frame, text="✅ COMPLETE SALE", command=self.complete_sale, 
+                  bg=COLORS["accent_green"], fg="#1e1e1e", font=('Segoe UI', 14, 'bold'), relief="flat", pady=15, cursor="hand2").pack(fill='x', side='bottom')
 
     # =========================================================================
     # 📦 INVENTORY TAB
     # =========================================================================
     def create_inventory_tab(self):
-        inventory_frame = ttk.Frame(self.notebook)
-        self.notebook.add(inventory_frame, text="📦 Inventory")
-        form_frame = ttk.LabelFrame(inventory_frame, text="Item Details", padding=10)
-        form_frame.pack(fill='x', padx=10, pady=10)
-        self.inventory_entries = {}
-        fields = [('SKU (Item Code)', 'sku', 'entry', 0), ('Title', 'title', 'entry', 0),
-                  ('Author/Supplier', 'author_supplier', 'entry', 1), ('Category', 'category', 'entry', 1),
-                  ('Type', 'product_type', 'combo', 2), ('Price (Selling)', 'price', 'entry', 2),
-                  ('Cost Price', 'cost_price', 'entry', 3), ('Stock Qty', 'stock', 'entry', 3)]
-        for i in range(4): form_frame.columnconfigure(i, weight=1)
-        for i, (label, key, widget_type, row_num) in enumerate(fields):
-            if key == 'cost_price' and self.current_role == "Attendant": continue 
-            col_idx = (i % 2) * 2
-            ttk.Label(form_frame, text=label).grid(row=row_num, column=col_idx, sticky='w', padx=5, pady=5)
-            if widget_type == 'combo':
-                entry = ttk.Combobox(form_frame, values=["Book", "Stationery", "Other"], state='readonly')
+        inv_frame = ttk.Frame(self.notebook, style="Panel.TFrame")
+        self.notebook.add(inv_frame, text="📦 Inventory")
+        
+        # Split: Form (Left) vs List (Right)
+        main_inv = tk.Frame(inv_frame, bg=COLORS["bg_panel"])
+        main_inv.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # --- LEFT: INPUT FORM ---
+        form_container = tk.LabelFrame(main_inv, text="Item Details", bg=COLORS["bg_panel"], fg="white", padx=15, pady=15, relief="flat")
+        form_container.pack(side='left', fill='y', padx=(0, 10))
+        
+        self.inv_entries = {}
+        fields = [('SKU', 'sku'), ('Title', 'title'), ('Author/Sup.', 'author_supplier'), 
+                  ('Category', 'category'), ('Type', 'product_type'), 
+                  ('Sell Price', 'price'), ('Cost Price', 'cost_price'), ('Stock', 'stock')]
+        
+        for idx, (lbl, key) in enumerate(fields):
+            if key == 'cost_price' and self.current_role == "Attendant": continue
+            
+            tk.Label(form_container, text=lbl, bg=COLORS["bg_panel"], fg="#cccccc").pack(anchor='w', pady=(5,0))
+            if key == 'product_type':
+                entry = ttk.Combobox(form_container, values=["Book", "Stationery", "Other"], state='readonly')
             else:
-                entry = ttk.Entry(form_frame)
-            entry.grid(row=row_num, column=col_idx+1, sticky='ew', padx=5, pady=5)
-            self.inventory_entries[key] = entry
+                entry = tk.Entry(form_container, bg="#444444", fg="white", relief="flat", insertbackground="white")
+            
+            entry.pack(fill='x', pady=(0, 5), ipady=4)
+            self.inv_entries[key] = entry
+            
+        # Buttons
+        btn_grid = tk.Frame(form_container, bg=COLORS["bg_panel"])
+        btn_grid.pack(fill='x', pady=15)
         
-        # --- ACTION BUTTONS ---
-        btn_frame = tk.Frame(form_frame, bg="#2b2b2b")
-        btn_frame.grid(row=4, column=0, columnspan=4, pady=15)
-        
-        self.btn_new = tk.Button(btn_frame, text="✨ RESET FORM", command=self.reset_form_for_new, bg="#9E9E9E", fg="white", relief="flat", padx=10)
-        self.btn_add = tk.Button(btn_frame, text="➕ ADD ITEM", command=self.add_product, bg="#4CAF50", fg="white", relief="flat", padx=10)
-        self.btn_update = tk.Button(btn_frame, text="💾 UPDATE", command=self.update_product, bg="#2196F3", fg="white", relief="flat", padx=10)
-        self.btn_delete = tk.Button(btn_frame, text="🗑️ DELETE", command=self.delete_product, bg="#F44336", fg="white", relief="flat", padx=10)
-        
-        self.btn_new.pack(side='left', padx=5)
-        self.btn_add.pack(side='left', padx=5)
-        self.btn_update.pack(side='left', padx=5)
-        self.btn_delete.pack(side='left', padx=5)
+        tk.Button(btn_grid, text="New", command=self.reset_form_for_new, bg="#666666", fg="white", width=8, relief="flat").grid(row=0, column=0, padx=2)
+        tk.Button(btn_grid, text="Save", command=self.add_product, bg=COLORS["accent_green"], fg="black", width=8, relief="flat").grid(row=0, column=1, padx=2)
+        tk.Button(btn_grid, text="Update", command=self.update_product, bg=COLORS["accent_blue"], fg="white", width=8, relief="flat").grid(row=1, column=0, padx=2, pady=5)
+        tk.Button(btn_grid, text="Delete", command=self.delete_product, bg=COLORS["accent_red"], fg="white", width=8, relief="flat").grid(row=1, column=1, padx=2, pady=5)
 
-        # --- SYNC BUTTONS ---
-        sync_frame = tk.Frame(form_frame, bg="#2b2b2b")
-        sync_frame.grid(row=5, column=0, columnspan=4, pady=5)
-        tk.Button(sync_frame, text="🔄 SYNC FROM CLOUD", command=lambda: threading.Thread(target=self.sync_inventory_from_firebase, daemon=True).start(), 
-                  bg="#607D8B", fg="white", relief="flat", padx=10).pack(side='left', padx=5)
-        
-        # Only admin should push all data
-        if self.current_role == "Director":
-            tk.Button(sync_frame, text="☁️ PUSH ALL TO CLOUD", command=self.push_all_to_firebase, 
-                      bg="#E91E63", fg="white", relief="flat", padx=10).pack(side='left', padx=5)
+        tk.Button(form_container, text="☁ Sync Cloud", command=lambda: threading.Thread(target=self.sync_inventory_from_firebase, daemon=True).start(), 
+                  bg=COLORS["accent_orange"], fg="black", relief="flat").pack(fill='x', pady=5)
 
-        if self.current_role == "Attendant":
-            self.btn_new.config(state="disabled", bg="#444444")
-            self.btn_add.config(state="disabled", bg="#444444")
-            self.btn_update.config(state="disabled", bg="#444444")
-            self.btn_delete.config(state="disabled", bg="#444444")
-            for key, entry in self.inventory_entries.items(): entry.config(state='disabled')
-            tk.Label(form_frame, text="🔒 RESTRICTED ACCESS: View Only", fg="#F44336", bg="#2b2b2b").grid(row=6, column=0, columnspan=4)
+        # --- RIGHT: LIST ---
+        list_container = tk.Frame(main_inv, bg=COLORS["bg_panel"])
+        list_container.pack(side='right', fill='both', expand=True)
         
-        list_frame = ttk.LabelFrame(inventory_frame, text="Stock List", padding=10)
-        list_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        self.inventory_tree = ttk.Treeview(list_frame, columns=('SKU', 'Title', 'Type', 'Category', 'Price', 'Cost', 'Stock'), show='headings')
-        headers = ['SKU', 'Title', 'Type', 'Category', 'Price', 'Cost', 'Stock']
+        self.inventory_tree = ttk.Treeview(list_container, columns=('SKU', 'Title', 'Type', 'Price', 'Cost', 'Stock'), show='headings')
+        headers = ['SKU', 'Title', 'Type', 'Price', 'Cost', 'Stock']
         for h in headers:
             self.inventory_tree.heading(h, text=h)
-            self.inventory_tree.column(h, width=100)
-        self.inventory_tree.column('Title', width=250)
+            self.inventory_tree.column(h, width=80)
+        self.inventory_tree.column('Title', width=200)
+        
         if self.current_role == "Attendant":
-             self.inventory_tree.heading('Cost', text='')
-             self.inventory_tree.column('Cost', width=0, stretch=False)
+            self.inventory_tree.column('Cost', width=0, stretch=False) # Hide cost
+            
         self.inventory_tree.pack(side='left', fill='both', expand=True)
-        scroll = ttk.Scrollbar(list_frame, command=self.inventory_tree.yview)
+        
+        scroll = ttk.Scrollbar(list_container, command=self.inventory_tree.yview)
         scroll.pack(side='right', fill='y')
         self.inventory_tree.configure(yscrollcommand=scroll.set)
+        
         if self.current_role != "Attendant":
             self.inventory_tree.bind('<<TreeviewSelect>>', self.on_inventory_select)
-            self.reset_form_for_new()
-        
+
     # =========================================================================
     # 📈 REPORTS TAB
     # =========================================================================
     def create_reports_tab(self):
-        reports_frame = ttk.Frame(self.notebook)
-        self.notebook.add(reports_frame, text="📈 Reports")
-        tool_frame = tk.Frame(reports_frame, bg="#2b2b2b")
-        tool_frame.pack(fill='x', padx=10, pady=10)
-        tk.Button(tool_frame, text="🔄 REFRESH", command=self.generate_report, bg="#2196F3", fg="white", relief="flat").pack(side='left', padx=5)
+        rep_frame = ttk.Frame(self.notebook, style="Panel.TFrame")
+        self.notebook.add(rep_frame, text="📈 Reports")
+        
+        toolbar = tk.Frame(rep_frame, bg=COLORS["bg_panel"])
+        toolbar.pack(fill='x', padx=10, pady=10)
+        
+        tk.Button(toolbar, text="🔄 REFRESH STATS", command=self.generate_report, bg=COLORS["accent_blue"], fg="white", relief="flat", padx=15).pack(side='left')
+        
         if self.current_role == "Director":
-            tk.Button(tool_frame, text="📤 EXPORT CSV", command=self.export_sales_to_csv, bg="#FF9800", fg="white", relief="flat").pack(side='left', padx=5)
-            self.btn_del_sale = tk.Button(tool_frame, text="🗑️ DELETE SALE", command=self.delete_sale_prompt, bg="#F44336", fg="white", relief="flat")
-            self.btn_del_sale.pack(side='right', padx=5)
-        split_frame = tk.Frame(reports_frame, bg="#2b2b2b")
-        split_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        self.reports_text = scrolledtext.ScrolledText(split_frame, width=50, bg="#383838", fg="white", font=('Consolas', 10))
-        self.reports_text.pack(side='left', fill='both', expand=True, padx=(0, 5))
-        self.sales_tree = ttk.Treeview(split_frame, columns=('ID', 'Total', 'Date'), show='headings')
+            tk.Button(toolbar, text="🗑️ VOID SELECTED SALE", command=self.delete_sale_prompt, bg=COLORS["accent_red"], fg="white", relief="flat", padx=15).pack(side='right')
+            tk.Button(toolbar, text="📤 EXPORT CSV", command=self.export_sales_to_csv, bg="#FF9800", fg="black", relief="flat", padx=15).pack(side='right', padx=10)
+
+        content = tk.Frame(rep_frame, bg=COLORS["bg_panel"])
+        content.pack(fill='both', expand=True, padx=10, pady=(0, 10))
+        
+        # Report Text
+        self.reports_text = scrolledtext.ScrolledText(content, width=40, bg="#1e1e1e", fg="white", font=('Consolas', 11), relief="flat", padx=10, pady=10)
+        self.reports_text.pack(side='left', fill='y')
+        
+        # Sales List
+        self.sales_tree = ttk.Treeview(content, columns=('ID', 'Total', 'Disc.', 'Date'), show='headings')
         self.sales_tree.heading('ID', text='ID')
-        self.sales_tree.heading('Total', text='Total')
-        self.sales_tree.heading('Date', text='Date')
+        self.sales_tree.heading('Total', text='Total Paid')
+        self.sales_tree.heading('Disc.', text='Discount')
+        self.sales_tree.heading('Date', text='Time')
+        
         self.sales_tree.column('ID', width=50)
-        self.sales_tree.pack(side='right', fill='both', expand=True, padx=(5, 0))
-        if self.current_role == "Director":
-            self.sales_tree.bind('<Double-1>', lambda e: self.delete_sale_prompt())
+        self.sales_tree.column('Disc.', width=80)
+        self.sales_tree.pack(side='right', fill='both', expand=True, padx=(10,0))
 
     # =========================================================================
-    # --- LOGIC & PRINTING & UPLOADING ---
+    # LOGIC: DISCOUNT, SALES & PRINTING
     # =========================================================================
 
-    # ---------------- NEW: CLOUD INVENTORY SYNC METHODS ----------------
-    def upload_product_to_firebase(self, product_data):
-        """Uploads a single product to Firebase using its SKU as key."""
-        try:
-            # Use SKU as the node key for easy updates
-            sku = product_data['sku']
-            url = f"{FIREBASE_URL}/products/{sku}.json"
-            response = requests.put(url, json=product_data)
-            if response.status_code == 200:
-                print(f"✅ Product {sku} synced to cloud.")
-            else:
-                print(f"❌ Failed to sync {sku}: {response.status_code}")
-        except Exception as e:
-            print(f"❌ Cloud Sync Error: {e}")
-
-    def delete_product_from_firebase(self, sku):
-        """Deletes a product from Firebase."""
-        try:
-            url = f"{FIREBASE_URL}/products/{sku}.json"
-            requests.delete(url)
-            print(f"🗑️ Product {sku} deleted from cloud.")
-        except Exception as e:
-            print(f"❌ Cloud Delete Error: {e}")
-
-    def sync_inventory_from_firebase(self):
-        """Downloads all products from Firebase and updates local DB."""
-        print("🔄 Starting Cloud Sync...")
-        try:
-            url = f"{FIREBASE_URL}/products.json"
-            response = requests.get(url)
-            if response.status_code == 200 and response.json():
-                products = response.json()
-                
-                # Check if products is a list (some imports might do this) or dict
-                if isinstance(products, list):
-                    # Filter out None values if any
-                    items = [p for p in products if p is not None]
-                else:
-                    items = products.values()
-
-                conn = sqlite3.connect('bookshop.db')
-                cursor = conn.cursor()
-                
-                count = 0
-                for item in items:
-                    if not isinstance(item, dict) or 'sku' not in item: continue
-                    
-                    # Use INSERT OR REPLACE to update existing items
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO products 
-                        (sku, title, author_supplier, category, product_type, price, cost_price, stock, date_added)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        item.get('sku'),
-                        item.get('title'),
-                        item.get('author_supplier', ''),
-                        item.get('category', ''),
-                        item.get('product_type', 'Book'),
-                        float(item.get('price', 0)),
-                        float(item.get('cost_price', 0)),
-                        int(item.get('stock', 0)),
-                        item.get('date_added', datetime.now().strftime('%Y-%m-%d'))
-                    ))
-                    count += 1
-                
-                conn.commit()
-                conn.close()
-                
-                # Update UI in main thread
-                self.root.after(0, self.refresh_inventory)
-                self.root.after(0, lambda: messagebox.showinfo("Sync Complete", f"✅ Synced {count} items from Cloud."))
-            else:
-                print("Cloud inventory is empty or unreachable.")
-        except Exception as e:
-            print(f"❌ Sync Failed: {e}")
-
-    def push_all_to_firebase(self):
-        """Reads all local products and uploads them to Firebase (One-time migration)."""
-        if not messagebox.askyesno("Confirm Push", "This will overwrite Cloud data with Local data.\nContinue?"):
-            return
-        
-        def _push_task():
-            try:
-                self.cursor.execute("SELECT * FROM products")
-                rows = self.cursor.fetchall()
-                # Get column names
-                col_names = [description[0] for description in self.cursor.description]
-                
-                for row in rows:
-                    # Create dict from row
-                    item = dict(zip(col_names, row))
-                    # Remove internal ID, use SKU
-                    if 'id' in item: del item['id']
-                    self.upload_product_to_firebase(item)
-                
-                self.root.after(0, lambda: messagebox.showinfo("Success", "All items pushed to Cloud!"))
-            except Exception as e:
-                print(e)
-        
-        threading.Thread(target=_push_task, daemon=True).start()
-    # -------------------------------------------------------------------
-
-    def print_receipt(self, receipt_data):
-        """
-        Sends formatted text to the Windows POS Printer
-        Modified to print TWO copies (Customer + Shop)
-        """
-        if not win32print:
-            messagebox.showwarning("Printing Error", "Required printer libraries not installed ('pywin32').\nReceipt not printed.")
+    def prompt_discount(self):
+        """Logic for the Discount Button"""
+        if not self.cart:
+            messagebox.showwarning("Cart Empty", "Add items before applying a discount.")
             return
 
-        # 1. Prepare the Common Body of the Receipt
-        # This part remains the same for both copies
-        body_text = "      HERIWADI BOOKSHOP      \n"
-        body_text += "      Tel: 0700-000-000      \n"
-        body_text += "-----------------------------\n"
-        body_text += f"Date: {receipt_data['date']}\n"
-        body_text += f"Served by: {self.current_user}\n"
-        body_text += "-----------------------------\n"
-        body_text += "ITEM            QTY     PRICE\n"
-        body_text += "-----------------------------\n"
+        amount = simpledialog.askfloat("Apply Discount", "Enter Discount Amount (KES):", parent=self.root, minvalue=0.0)
         
-        for item in receipt_data['items']:
-            # Truncate title if too long
-            title = (item['title'][:12] + '..') if len(item['title']) > 12 else item['title']
-            line = f"{title:<14} {item['qty']:<3} {item['price']*item['qty']:>8.2f}\n"
-            body_text += line
+        if amount is not None:
+            if amount >= self.subtotal:
+                messagebox.showerror("Error", "Discount cannot exceed Subtotal!")
+                return
             
-        body_text += "-----------------------------\n"
-        body_text += f"TOTAL:         KES {receipt_data['total']:,.2f}\n"
-        body_text += f"PAID:          KES {receipt_data['paid']:,.2f}\n"
-        body_text += f"CHANGE:        KES {receipt_data['change']:,.2f}\n"
-        body_text += "-----------------------------\n"
-        body_text += "      Thank You! Karibu!      \n"
-        body_text += "\n\n\n\n" # Feed lines
+            self.discount_amount = amount
+            self.update_cart_ui()
 
-        # 2. Define the Labels for the two copies
-        copies_to_print = ["*** CUSTOMER COPY ***", "*** SHOP RETAIN COPY ***"]
+    def update_cart_ui(self):
+        self.cart_text.delete(1.0, 'end')
+        self.subtotal = 0.0
+        
+        # 1. Calculate Subtotal
+        for item in self.cart:
+            line_total = item['price'] * item['qty']
+            self.subtotal += line_total
+            self.cart_text.insert('end', f"{item['title'][:20]:<20} x{item['qty']}  {line_total:>8.2f}\n")
+        
+        # 2. Calculate Final
+        self.final_total = self.subtotal - self.discount_amount
+        
+        # 3. Update Labels
+        self.lbl_subtotal.config(text=f"Subtotal: {self.subtotal:,.2f}")
+        self.lbl_discount.config(text=f"Discount: -{self.discount_amount:,.2f}")
+        self.total_label.config(text=f"KES {self.final_total:,.2f}")
+        
+        self.calculate_change()
 
-        # 3. Loop through and print both copies
-        for copy_label in copies_to_print:
+    def calculate_change(self, event=None):
+        try:
+            paid_str = self.amount_paid_entry.get()
+            if not paid_str: 
+                self.change_label.config(text="Change: KES 0.00")
+                return
+                
+            paid = float(paid_str)
+            change = paid - self.final_total
+            
+            color = COLORS["accent_green"] if change >= 0 else COLORS["accent_red"]
+            self.change_label.config(text=f"Change: KES {change:,.2f}", fg=color)
+        except ValueError:
+            pass
+
+    def complete_sale(self):
+        if not self.cart: return
+        
+        try:
+            paid = float(self.amount_paid_entry.get())
+            if paid < self.final_total:
+                messagebox.showerror("Error", "Insufficient Funds")
+                return
+            
+            # --- PROFIT CALCULATION ---
+            # Cost of Goods Sold
+            cogs = sum([i['cost'] * i['qty'] for i in self.cart])
+            # Revenue = Final Total (after discount)
+            # Profit = Revenue - COGS
+            profit = self.final_total - cogs
+            
+            date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            items_json = json.dumps(self.cart)
+
+            # 1. DB Insert
+            self.cursor.execute("""
+                INSERT INTO sales (sale_date, total_amount, discount, total_profit, payment_method, items_json) 
+                VALUES (?,?,?,?,?,?)
+            """, (date_str, self.final_total, self.discount_amount, profit, self.payment_var.get(), items_json))
+            
+            # 2. Stock Update
+            for i in self.cart:
+                self.cursor.execute("UPDATE products SET stock = stock - ? WHERE sku=?", (i['qty'], i['sku']))
+                new_stock = self.cursor.execute("SELECT stock FROM products WHERE sku=?", (i['sku'],)).fetchone()[0]
+                # Background Cloud Sync
+                threading.Thread(target=lambda s=i['sku'], st=new_stock: requests.patch(f"{FIREBASE_URL}/products/{s}.json", json={"stock": st}), daemon=True).start()
+
+            self.conn.commit()
+            
+            # 3. Receipt
+            receipt_data = {
+                'date': date_str,
+                'items': self.cart,
+                'subtotal': self.subtotal,
+                'discount': self.discount_amount,
+                'total': self.final_total,
+                'paid': paid,
+                'change': paid - self.final_total
+            }
+            self.print_receipt(receipt_data)
+            
+            # 4. Upload Sale
+            sale_data = {
+                "date": date_str, "amount": self.final_total, "profit": profit, 
+                "discount": self.discount_amount, "method": self.payment_var.get(), "user": self.current_user
+            }
+            threading.Thread(target=lambda: requests.post(f"{FIREBASE_URL}/sales.json", json=sale_data), daemon=True).start()
+
+            messagebox.showinfo("Success", f"Sale Complete!\nChange: {paid - self.final_total:,.2f}")
+            self.clear_cart()
+            self.refresh_inventory()
+            
+        except ValueError: messagebox.showerror("Error", "Invalid Amount Paid")
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def clear_cart(self):
+        self.cart = []
+        self.discount_amount = 0.0
+        self.update_cart_ui()
+        self.amount_paid_entry.delete(0, 'end')
+
+    def print_receipt(self, data):
+        """Updated Receipt Format with Discount"""
+        if not win32print: return
+
+        txt = "      HERIWADI BOOKSHOP      \n"
+        txt += "      Tel: 0700-000-000      \n"
+        txt += "-----------------------------\n"
+        txt += f"Date: {data['date']}\n"
+        txt += f"Served by: {self.current_user}\n"
+        txt += "-----------------------------\n"
+        txt += "ITEM             QTY    TOTAL\n"
+        for item in data['items']:
+            title = (item['title'][:14] + '..') if len(item['title']) > 14 else item['title']
+            txt += f"{title:<16} {item['qty']:<3} {item['price']*item['qty']:>8.2f}\n"
+        txt += "-----------------------------\n"
+        txt += f"SUBTOTAL:      KES {data['subtotal']:,.2f}\n"
+        if data['discount'] > 0:
+            txt += f"DISCOUNT:     -KES {data['discount']:,.2f}\n"
+        txt += f"TOTAL:         KES {data['total']:,.2f}\n"
+        txt += "-----------------------------\n"
+        txt += f"PAID:          KES {data['paid']:,.2f}\n"
+        txt += f"CHANGE:        KES {data['change']:,.2f}\n"
+        txt += "-----------------------------\n"
+        txt += "      Thank You! Karibu!      \n\n\n\n"
+
+        copies = ["*** CUSTOMER COPY ***", "*** SHOP COPY ***"]
+        for copy in copies:
             try:
-                # Add the specific label to the top of the text
-                final_text = f"{copy_label}\n{body_text}"
-
+                final = f"{copy}\n{txt}"
                 hPrinter = win32print.OpenPrinter(PRINTER_NAME)
                 try:
                     hJob = win32print.StartDocPrinter(hPrinter, 1, ("Receipt", None, "RAW"))
                     try:
                         win32print.StartPagePrinter(hPrinter)
-                        win32print.WritePrinter(hPrinter, final_text.encode("utf-8"))
-                        # Cut Paper Command (Standard ESC/POS: GS V 66 0)
-                        win32print.WritePrinter(hPrinter, b'\x1d\x56\x42\x00') 
+                        win32print.WritePrinter(hPrinter, final.encode("utf-8"))
+                        win32print.WritePrinter(hPrinter, b'\x1d\x56\x42\x00') # Cut
                         win32print.EndPagePrinter(hPrinter)
-                    finally:
-                        win32print.EndDocPrinter(hPrinter)
-                finally:
-                    win32print.ClosePrinter(hPrinter)
-            
-            except Exception as e:
-                messagebox.showerror("Printer Error", f"Could not print {copy_label}.\n\nDetails: {str(e)}")
-                # If printing fails, stop the loop so we don't get two error messages
-                break
+                    finally: win32print.EndDocPrinter(hPrinter)
+                finally: win32print.ClosePrinter(hPrinter)
+            except: pass
 
-    def upload_to_firebase(self, data):
-        """Sends sales data to the web dashboard."""
-        try:
-            url = f"{FIREBASE_URL}/sales.json"
-            response = requests.post(url, json=data)
-            if response.status_code == 200:
-                 print("✅ Sale uploaded to Firebase.")
-            else:
-                 print(f"❌ Firebase Upload Failed. Status: {response.status_code}")
-        except Exception as e:
-            print(f"❌ Upload Failed (Connection Error): {e}")
-
-    def complete_sale(self):
-        if not self.cart: return
-        
-        profit = sum([(i['price'] - i['cost']) * i['qty'] for i in self.cart])
-        
-        try:
-            paid = float(self.amount_paid_entry.get())
-            if paid < self.cart_total:
-                messagebox.showerror("Error", "Insufficient Funds")
-                return
-            
-            # 1. Prepare Data & Date String
-            date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            items_json = json.dumps(self.cart)
-
-            # 2. Save to LOCAL Database (SQLite) and update stock
-            self.cursor.execute("INSERT INTO sales (sale_date, total_amount, total_profit, payment_method, items_json) VALUES (?,?,?,?,?)",
-                                (date_str, self.cart_total, profit, self.payment_var.get(), items_json))
-            
-            for i in self.cart:
-                self.cursor.execute("UPDATE products SET stock = stock - ? WHERE sku=?", (i['qty'], i['sku']))
-                
-                # --- UPDATE FIREBASE STOCK ---
-                # We need to calculate new stock to send to firebase
-                new_stock = self.cursor.execute("SELECT stock FROM products WHERE sku=?", (i['sku'],)).fetchone()[0]
-                # Update just the stock field in Firebase
-                threading.Thread(target=lambda s=i['sku'], st=new_stock: requests.patch(f"{FIREBASE_URL}/products/{s}.json", json={"stock": st}), daemon=True).start()
-
-            self.conn.commit()
-            
-            # 3. Handle Printing
-            receipt_data = {
-                'date': date_str,
-                'items': self.cart,
-                'total': self.cart_total,
-                'paid': paid,
-                'change': paid - self.cart_total
-            }
-            self.print_receipt(receipt_data)
-            
-            # 4. ☁️ Upload Sale to Firebase
-            sale_data = {
-                "sale_date": date_str,
-                "timestamp": date_str, 
-                "total_amount": self.cart_total,
-                "total_profit": profit,
-                "payment_method": self.payment_var.get(),
-                "items": self.cart,
-                "cashier": self.current_user
-            }
-            threading.Thread(target=self.upload_to_firebase, args=(sale_data,), daemon=True).start()
-
-            # 5. UI Reset & Success
-            messagebox.showinfo("Success", f"Sale Complete!\nChange: {paid - self.cart_total:,.2f}")
-            self.cart = []
-            self.update_cart_ui()
-            self.amount_paid_entry.delete(0, 'end')
-            self.refresh_inventory()
-            
-        except ValueError: messagebox.showerror("Error", "Invalid Amount Paid")
-        except sqlite3.OperationalError as e:
-             messagebox.showerror("Database Error", f"Database operation failed.\nError: {e}")
-        except Exception as e:
-             messagebox.showerror("System Error", f"An unexpected error occurred during sale completion.\nError: {e}")
-
-    # --- Other Standard Methods ---
-    def reset_form_for_new(self):
-        if self.current_role == "Attendant": return
-        for key, entry in self.inventory_entries.items():
-            entry.config(state='normal')
-            entry.delete(0, 'end')
-            if key == 'product_type': entry.set('Book')
-        self.inventory_entries['sku'].config(state='normal', background="#ffffff")
-        self.inventory_entries['sku'].focus()
-
-    def on_inventory_select(self, event):
-        selection = self.inventory_tree.selection()
-        if not selection: return
-        vals = self.inventory_tree.item(selection[0])['values']
-        if self.current_role == "Attendant": return
-        for entry in self.inventory_entries.values():
-            entry.config(state='normal')
-            entry.delete(0, 'end')
-        self.inventory_entries['sku'].insert(0, vals[0])
-        self.inventory_entries['title'].insert(0, vals[1])
-        self.inventory_entries['product_type'].set(vals[2])
-        self.inventory_entries['category'].insert(0, vals[3])
-        self.inventory_entries['price'].insert(0, vals[4])
-        self.inventory_entries['cost_price'].insert(0, vals[5])
-        self.inventory_entries['stock'].insert(0, vals[6])
-        self.cursor.execute("SELECT author_supplier FROM products WHERE sku=?", (vals[0],))
-        res = self.cursor.fetchone()
-        if res: self.inventory_entries['author_supplier'].insert(0, res[0])
-        self.inventory_entries['sku'].config(state='readonly', background="#cccccc")
-
-    def add_product(self):
-        try:
-            data = {k: v.get().strip() for k, v in self.inventory_entries.items() if k in self.inventory_entries} 
-            if not data['sku'] or not data['title']: return
-            cost_price = float(data.get('cost_price') or 0.0) 
-            date_now = datetime.now().strftime('%Y-%m-%d')
-            
-            # 1. Local Save
-            self.cursor.execute('INSERT INTO products (sku, title, author_supplier, category, product_type, price, cost_price, stock, date_added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                (data['sku'], data['title'], data['author_supplier'], data['category'], data['product_type'], float(data['price']), cost_price, int(data['stock']), date_now))
-            self.conn.commit()
-            
-            # 2. Cloud Upload (Threaded)
-            upload_data = data.copy()
-            upload_data['price'] = float(data['price'])
-            upload_data['cost_price'] = cost_price
-            upload_data['stock'] = int(data['stock'])
-            upload_data['date_added'] = date_now
-            threading.Thread(target=self.upload_product_to_firebase, args=(upload_data,), daemon=True).start()
-
-            messagebox.showinfo("Success", "Product Added & Uploaded!")
-            self.refresh_inventory()
-            
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Error", "SKU already exists!")
-        except ValueError:
-            messagebox.showerror("Error", "Invalid Price/Stock values")
-
-    def update_product(self):
-        if self.current_role == "Attendant": return
-        try:
-            data = {k: v.get().strip() for k, v in self.inventory_entries.items() if k in self.inventory_entries} 
-            if not data['sku']: return
-            cost_price = float(data.get('cost_price') or 0.0)
-            
-            # 1. Local Update
-            self.cursor.execute('''
-                UPDATE products SET title=?, author_supplier=?, category=?, product_type=?, price=?, cost_price=?, stock=?
-                WHERE sku=?
-            ''', (data['title'], data['author_supplier'], data['category'], data['product_type'], 
-                  float(data['price']), cost_price, int(data['stock']), data['sku']))
-            self.conn.commit()
-            
-            # 2. Cloud Update
-            upload_data = data.copy()
-            upload_data['price'] = float(data['price'])
-            upload_data['cost_price'] = cost_price
-            upload_data['stock'] = int(data['stock'])
-            threading.Thread(target=self.upload_product_to_firebase, args=(upload_data,), daemon=True).start()
-
-            messagebox.showinfo("Success", "Product Updated!")
-            self.refresh_inventory()
-            self.reset_form_for_new()
-        except Exception as e:
-            messagebox.showerror("Error", f"Update failed: {e}")
-
-    def delete_product(self):
-        if self.current_role == "Attendant": return
-        sku = self.inventory_entries['sku'].get()
-        if not sku: return
-        if messagebox.askyesno("Confirm", "Delete this item?"):
-            self.cursor.execute("DELETE FROM products WHERE sku=?", (sku,))
-            self.conn.commit()
-            threading.Thread(target=self.delete_product_from_firebase, args=(sku,), daemon=True).start()
-            self.refresh_inventory()
-            self.reset_form_for_new()
-
+    # =========================================================================
+    # INVENTORY LOGIC & CLOUD SYNC
+    # =========================================================================
     def search_product(self):
         query = self.search_entry.get().strip()
         self.search_tree.delete(*self.search_tree.get_children())
-        if not query:
-            self.cursor.execute("SELECT sku, title, product_type, price, stock FROM products WHERE stock > 0 LIMIT 20")
-        else:
-            self.cursor.execute("SELECT sku, title, product_type, price, stock FROM products WHERE (sku LIKE ? OR title LIKE ?) AND stock > 0", 
-                                (f'%{query}%', f'%{query}%'))
+        
+        sql = "SELECT sku, title, price, stock FROM products WHERE stock > 0"
+        params = ()
+        if query:
+            sql += " AND (sku LIKE ? OR title LIKE ?)"
+            params = (f'%{query}%', f'%{query}%')
+            
+        self.cursor.execute(sql + " LIMIT 30", params)
         for row in self.cursor.fetchall():
             self.search_tree.insert('', 'end', values=row)
 
     def add_to_cart(self):
-        selection = self.search_tree.selection()
-        if not selection: return
-        item_vals = self.search_tree.item(selection[0])['values']
-        
-        # Check if already in cart
-        for i, item in enumerate(self.cart):
-            if item['sku'] == item_vals[0]:
-                if item['qty'] + 1 > item_vals[4]:
-                     messagebox.showwarning("Stock", "Not enough stock available!")
-                     return
+        sel = self.search_tree.selection()
+        if not sel: return
+        vals = self.search_tree.item(sel[0])['values']
+        sku, title, price, stock = vals[0], vals[1], float(vals[2]), int(vals[3])
+
+        for item in self.cart:
+            if item['sku'] == sku:
+                if item['qty'] + 1 > stock:
+                    messagebox.showwarning("Stock", "Limit reached!")
+                    return
                 item['qty'] += 1
                 self.update_cart_ui()
                 return
-        
-        # Query cost price for profit calculation
-        self.cursor.execute("SELECT cost_price FROM products WHERE sku=?", (item_vals[0],))
+
+        self.cursor.execute("SELECT cost_price FROM products WHERE sku=?", (sku,))
         cost = self.cursor.fetchone()[0]
         
-        self.cart.append({
-            'sku': item_vals[0],
-            'title': item_vals[1],
-            'price': float(item_vals[3]),
-            'cost': cost,
-            'qty': 1
-        })
+        self.cart.append({'sku': sku, 'title': title, 'price': price, 'cost': cost, 'qty': 1})
         self.update_cart_ui()
+        self.search_entry.delete(0, 'end')
 
-    def update_cart_ui(self):
-        self.cart_text.delete(1.0, 'end')
-        self.cart_total = 0.0
-        for item in self.cart:
-            line_total = item['price'] * item['qty']
-            self.cart_total += line_total
-            self.cart_text.insert('end', f"{item['title']} x{item['qty']} = {line_total:,.2f}\n")
-        self.total_label.config(text=f"KES {self.cart_total:,.2f}")
-        self.calculate_change()
-
-    def clear_cart(self):
-        self.cart = []
-        self.update_cart_ui()
-        self.amount_paid_entry.delete(0, 'end')
-
-    def calculate_change(self, event=None):
+    def sync_inventory_from_firebase(self):
         try:
-            paid = float(self.amount_paid_entry.get())
-            change = paid - self.cart_total
-            self.change_label.config(text=f"Change: KES {change:,.2f}", fg="#4CAF50" if change >= 0 else "#F44336")
-        except ValueError:
-            self.change_label.config(text="Change: KES 0.00")
+            r = requests.get(f"{FIREBASE_URL}/products.json")
+            if r.status_code == 200 and r.json():
+                data = r.json()
+                items = data.values() if isinstance(data, dict) else [x for x in data if x]
+                
+                conn = sqlite3.connect('bookshop.db')
+                cur = conn.cursor()
+                count = 0
+                for i in items:
+                    if 'sku' not in i: continue
+                    cur.execute('''
+                        INSERT OR REPLACE INTO products (sku, title, author_supplier, category, product_type, price, cost_price, stock, date_added)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (i.get('sku'), i.get('title'), i.get('author_supplier'), i.get('category'), i.get('product_type'), 
+                          float(i.get('price',0)), float(i.get('cost_price',0)), int(i.get('stock',0)), i.get('date_added')))
+                    count += 1
+                conn.commit()
+                conn.close()
+                self.root.after(0, self.refresh_inventory)
+                print(f"Synced {count} items.")
+        except Exception as e: print(f"Sync error: {e}")
+
+    # --- CRUD Wrappers ---
+    def reset_form_for_new(self):
+        if self.current_role == "Attendant": return
+        for k, v in self.inv_entries.items():
+            v.config(state='normal')
+            if isinstance(v, ttk.Combobox): v.set('')
+            else: v.delete(0, 'end')
+        self.inv_entries['sku'].config(bg="white")
+    
+    def on_inventory_select(self, event):
+        sel = self.inventory_tree.selection()
+        if not sel: return
+        vals = self.inventory_tree.item(sel[0])['values']
+        self.reset_form_for_new()
+        
+        self.inv_entries['sku'].insert(0, vals[0])
+        self.inv_entries['title'].insert(0, vals[1])
+        self.inv_entries['product_type'].set(vals[2])
+        self.inv_entries['price'].insert(0, vals[3])
+        self.inv_entries['cost_price'].insert(0, vals[4])
+        self.inv_entries['stock'].insert(0, vals[5])
+        
+        res = self.cursor.execute("SELECT author_supplier, category FROM products WHERE sku=?", (vals[0],)).fetchone()
+        if res:
+            self.inv_entries['author_supplier'].insert(0, res[0])
+            self.inv_entries['category'].insert(0, res[1])
+        
+        self.inv_entries['sku'].config(state='readonly', bg="#cccccc")
+
+    def add_product(self):
+        # Implementation similar to original but using dictionary comprehension for cleaner code
+        try:
+            d = {k: v.get() for k, v in self.inv_entries.items()}
+            if not d['sku'] or not d['title']: return
+            
+            self.cursor.execute("INSERT INTO products (sku, title, author_supplier, category, product_type, price, cost_price, stock, date_added) VALUES (?,?,?,?,?,?,?,?,?)",
+                                (d['sku'], d['title'], d['author_supplier'], d['category'], d['product_type'], float(d['price']), float(d['cost_price']), int(d['stock']), datetime.now().strftime('%Y-%m-%d')))
+            self.conn.commit()
+            
+            # Cloud Push
+            threading.Thread(target=lambda: requests.put(f"{FIREBASE_URL}/products/{d['sku']}.json", json=d), daemon=True).start()
+            
+            messagebox.showinfo("Success", "Added")
+            self.refresh_inventory()
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def update_product(self):
+        try:
+            d = {k: v.get() for k, v in self.inv_entries.items()}
+            self.cursor.execute("UPDATE products SET title=?, author_supplier=?, category=?, product_type=?, price=?, cost_price=?, stock=? WHERE sku=?",
+                                (d['title'], d['author_supplier'], d['category'], d['product_type'], float(d['price']), float(d['cost_price']), int(d['stock']), d['sku']))
+            self.conn.commit()
+            threading.Thread(target=lambda: requests.put(f"{FIREBASE_URL}/products/{d['sku']}.json", json=d), daemon=True).start()
+            messagebox.showinfo("Success", "Updated")
+            self.refresh_inventory()
+        except Exception as e: messagebox.showerror("Error", str(e))
+
+    def delete_product(self):
+        sku = self.inv_entries['sku'].get()
+        if messagebox.askyesno("Confirm", "Delete item?"):
+            self.cursor.execute("DELETE FROM products WHERE sku=?", (sku,))
+            self.conn.commit()
+            threading.Thread(target=lambda: requests.delete(f"{FIREBASE_URL}/products/{sku}.json"), daemon=True).start()
+            self.refresh_inventory()
 
     def refresh_inventory(self):
         self.inventory_tree.delete(*self.inventory_tree.get_children())
-        self.cursor.execute("SELECT sku, title, product_type, category, price, cost_price, stock FROM products")
-        for row in self.cursor.fetchall():
+        for row in self.cursor.execute("SELECT sku, title, product_type, price, cost_price, stock FROM products"):
             self.inventory_tree.insert('', 'end', values=row)
 
+    # =========================================================================
+    # REPORTS LOGIC
+    # =========================================================================
     def generate_report(self):
         self.sales_tree.delete(*self.sales_tree.get_children())
         self.reports_text.delete(1.0, 'end')
         
-        # Daily Sales
         today = datetime.now().strftime('%Y-%m-%d')
-        self.cursor.execute("SELECT sum(total_amount), sum(total_profit) FROM sales WHERE sale_date LIKE ?", (f'{today}%',))
-        res = self.cursor.fetchone()
-        daily_sales = res[0] or 0.0
-        daily_profit = res[1] or 0.0
+        res_day = self.cursor.execute("SELECT sum(total_amount), sum(discount), sum(total_profit) FROM sales WHERE sale_date LIKE ?", (f'{today}%',)).fetchone()
+        res_all = self.cursor.execute("SELECT sum(total_amount), sum(discount), sum(total_profit) FROM sales").fetchone()
         
-        # Total Sales
-        self.cursor.execute("SELECT sum(total_amount), sum(total_profit) FROM sales")
-        res_total = self.cursor.fetchone()
-        total_sales = res_total[0] or 0.0
-        total_profit = res_total[1] or 0.0
+        # Safe unpacking (handle None)
+        day_sales, day_disc, day_profit = [x or 0.0 for x in res_day]
+        all_sales, all_disc, all_profit = [x or 0.0 for x in res_all]
         
-        report = f"📊 SALES REPORT ({datetime.now().strftime('%d-%b-%Y')})\n"
-        report += "========================================\n"
-        report += f"TODAY'S SALES:      KES {daily_sales:,.2f}\n"
-        report += f"TODAY'S PROFIT:     KES {daily_profit:,.2f}\n"
-        report += "----------------------------------------\n"
-        report += f"LIFETIME SALES:     KES {total_sales:,.2f}\n"
-        report += f"LIFETIME PROFIT:    KES {total_profit:,.2f}\n"
-        report += "========================================\n"
+        rpt = f"📊 PERFORMANCE REPORT\n========================\n"
+        rpt += f"TODAY'S REVENUE:   KES {day_sales:,.2f}\n"
+        rpt += f"TODAY'S DISCOUNT:  KES {day_disc:,.2f}\n"
+        rpt += f"TODAY'S PROFIT:    KES {day_profit:,.2f}\n"
+        rpt += "------------------------\n"
+        rpt += f"TOTAL REVENUE:     KES {all_sales:,.2f}\n"
+        rpt += f"TOTAL DISCOUNT:    KES {all_disc:,.2f}\n"
+        rpt += f"TOTAL PROFIT:      KES {all_profit:,.2f}\n"
         
-        self.reports_text.insert('end', report)
+        self.reports_text.insert('end', rpt)
         
-        # Populate List
-        self.cursor.execute("SELECT id, total_amount, sale_date FROM sales ORDER BY id DESC LIMIT 50")
-        for row in self.cursor.fetchall():
+        for row in self.cursor.execute("SELECT id, total_amount, discount, sale_date FROM sales ORDER BY id DESC LIMIT 50"):
             self.sales_tree.insert('', 'end', values=row)
 
     def export_sales_to_csv(self):
         try:
-            filename = f"sales_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            self.cursor.execute("SELECT * FROM sales")
-            rows = self.cursor.fetchall()
-            col_names = [description[0] for description in self.cursor.description]
-            
-            with open(filename, 'w', newline='') as f:
+            fname = f"sales_{datetime.now().strftime('%Y%m%d')}.csv"
+            with open(fname, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(col_names)
-                writer.writerows(rows)
-            messagebox.showinfo("Export", f"Exported to {filename}")
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+                writer.writerow([i[0] for i in self.cursor.description])
+                writer.writerows(self.cursor.execute("SELECT * FROM sales"))
+            messagebox.showinfo("Export", f"Saved: {fname}")
+        except Exception as e: messagebox.showerror("Error", str(e))
 
     def delete_sale_prompt(self):
-        selection = self.sales_tree.selection()
-        if not selection: return
-        sale_id = self.sales_tree.item(selection[0])['values'][0]
+        sel = self.sales_tree.selection()
+        if not sel: return
+        sid = self.sales_tree.item(sel[0])['values'][0]
         
-        if messagebox.askyesno("Delete Sale", "This will revert stock counts locally.\nContinue?"):
-            # 1. Revert Stock
-            self.cursor.execute("SELECT items_json FROM sales WHERE id=?", (sale_id,))
-            items_json = self.cursor.fetchone()[0]
-            items = json.loads(items_json)
-            for item in items:
-                self.cursor.execute("UPDATE products SET stock = stock + ? WHERE sku=?", (item['qty'], item['sku']))
-                # Revert Firebase Stock
-                new_stock = self.cursor.execute("SELECT stock FROM products WHERE sku=?", (item['sku'],)).fetchone()[0]
-                threading.Thread(target=lambda s=item['sku'], st=new_stock: requests.patch(f"{FIREBASE_URL}/products/{s}.json", json={"stock": st}), daemon=True).start()
-
-            # 2. Delete Record
-            self.cursor.execute("DELETE FROM sales WHERE id=?", (sale_id,))
+        if messagebox.askyesno("Delete Sale", "Revert stock and delete record?"):
+            items = json.loads(self.cursor.execute("SELECT items_json FROM sales WHERE id=?", (sid,)).fetchone()[0])
+            for i in items:
+                self.cursor.execute("UPDATE products SET stock = stock + ? WHERE sku=?", (i['qty'], i['sku']))
+                new_stk = self.cursor.execute("SELECT stock FROM products WHERE sku=?", (i['sku'],)).fetchone()[0]
+                threading.Thread(target=lambda s=i['sku'], st=new_stk: requests.patch(f"{FIREBASE_URL}/products/{s}.json", json={"stock": st}), daemon=True).start()
+            
+            self.cursor.execute("DELETE FROM sales WHERE id=?", (sid,))
             self.conn.commit()
-            
-            # 3. Delete from Firebase (Optional/Complex - requires ID mapping, skipped for simplicity)
-            
-            messagebox.showinfo("Deleted", "Sale deleted and stock reverted.")
             self.generate_report()
             self.refresh_inventory()
 
 if __name__ == "__main__":
     initialize_database()
     root = tk.Tk()
-    
-    # Simple Login Wrapper
-    def start_pos(username, role):
-        app = BookshopPOS(root, username, role)
-        
-    login = LoginWindow(root, start_pos)
+    LoginWindow(root, lambda u, r: BookshopPOS(root, u, r))
     root.mainloop()
